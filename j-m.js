@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.0
+// @version      4.2
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -36,47 +36,41 @@
 
     // ==================== 现代化颜色主题 ====================
     const COLORS = {
-        // JavDB 橙色主题
+        // JavDB 橙色主题 - 深橙色
         javdb: {
-            bg: 'linear-gradient(135deg, #f39c12 0%, #e67e22 100%)',
-            bgSolid: '#f39c12',
-            shadow: 'rgba(243, 156, 18, 0.4)',
-            hover: 'linear-gradient(135deg, #e67e22 0%, #f39c12 100%)'
+            bg: '#e67e22',
+            bgHover: '#d35400',
+            shadow: 'rgba(230, 126, 34, 0.5)'
         },
-        // MissAV 粉红主题
+        // MissAV 红色主题 - 深红色
         missav: {
-            bg: 'linear-gradient(135deg, #f857a6 0%, #ff5858 100%)',
-            bgSolid: '#f857a6',
-            shadow: 'rgba(248, 87, 166, 0.4)',
-            hover: 'linear-gradient(135deg, #ff5858 0%, #f857a6 100%)'
+            bg: '#e74c3c',
+            bgHover: '#c0392b',
+            shadow: 'rgba(231, 76, 60, 0.5)'
         },
-        // 搜索蓝色主题
+        // 搜索蓝色主题 - 深蓝色
         search: {
-            bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-            bgSolid: '#4facfe',
-            shadow: 'rgba(79, 172, 254, 0.4)',
-            hover: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)'
+            bg: '#3498db',
+            bgHover: '#2980b9',
+            shadow: 'rgba(52, 152, 219, 0.5)'
         },
-        // 加载中灰色
+        // 加载中灰色 - 深灰色
         loading: {
-            bg: 'linear-gradient(135deg, #bdc3c7 0%, #95a5a6 100%)',
-            bgSolid: '#95a5a6',
-            shadow: 'rgba(149, 165, 166, 0.4)',
-            hover: 'linear-gradient(135deg, #95a5a6 0%, #bdc3c7 100%)'
+            bg: '#7f8c8d',
+            bgHover: '#95a5a6',
+            shadow: 'rgba(127, 140, 141, 0.5)'
         },
-        // 成功绿色
+        // 成功绿色 - 深绿色
         success: {
-            bg: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
-            bgSolid: '#11998e',
-            shadow: 'rgba(56, 239, 125, 0.4)',
-            hover: 'linear-gradient(135deg, #38ef7d 0%, #11998e 100%)'
+            bg: '#27ae60',
+            bgHover: '#2ecc71',
+            shadow: 'rgba(39, 174, 96, 0.5)'
         },
-        // 错误红色
+        // 错误红色 - 深红色
         error: {
-            bg: 'linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%)',
-            bgSolid: '#ff416c',
-            shadow: 'rgba(255, 65, 108, 0.4)',
-            hover: 'linear-gradient(135deg, #ff4b2b 0%, #ff416c 100%)'
+            bg: '#c0392b',
+            bgHover: '#e74c3c',
+            shadow: 'rgba(192, 57, 43, 0.5)'
         }
     };
 
@@ -117,21 +111,22 @@
                     align-items: center;
                     justify-content: center;
                     gap: 6px;
-                    padding: 8px 16px;
-                    margin-left: 10px;
-                    color: white;
-                    border-radius: 10px;
+                    padding: 6px 14px;
+                    margin-left: 8px;
+                    color: #ffffff;
+                    border-radius: 6px;
                     font-size: 13px;
-                    font-weight: 600;
+                    font-weight: 700;
                     font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
                     text-decoration: none;
                     cursor: pointer;
-                    border: 1px solid rgba(255, 255, 255, 0.2);
-                    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
-                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
-                    animation: bridge-fadeIn 0.4s ease-out;
+                    border: none;
+                    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+                    transition: all 0.2s ease;
+                    animation: bridge-fadeIn 0.3s ease-out;
                     vertical-align: middle;
-                    line-height: 1;
+                    line-height: 1.2;
+                    letter-spacing: 0.3px;
                 }
 
                 .bridge-btn:hover {
@@ -165,7 +160,7 @@
                 .javdb-bridge-container {
                     display: inline-flex;
                     align-items: center;
-                    gap: 8px;
+                    gap: 6px;
                     margin-left: 10px;
                 }
 
@@ -173,45 +168,15 @@
                 .missav-bridge-container {
                     display: inline-flex;
                     align-items: center;
-                    gap: 8px;
-                    margin-left: 12px;
-                }
-
-                /* Tooltip */
-                .bridge-btn[data-tooltip] {
-                    position: relative;
-                }
-
-                .bridge-btn[data-tooltip]::after {
-                    content: attr(data-tooltip);
-                    position: absolute;
-                    bottom: 100%;
-                    left: 50%;
-                    transform: translateX(-50%);
-                    padding: 6px 10px;
-                    background: rgba(15, 23, 42, 0.9);
-                    color: white;
-                    font-size: 11px;
-                    font-weight: 500;
-                    border-radius: 6px;
-                    white-space: nowrap;
-                    opacity: 0;
-                    visibility: hidden;
-                    transition: all 0.2s;
-                    margin-bottom: 6px;
-                    pointer-events: none;
-                }
-
-                .bridge-btn[data-tooltip]:hover::after {
-                    opacity: 1;
-                    visibility: visible;
+                    gap: 6px;
+                    margin-left: 10px;
                 }
             `;
             document.head.appendChild(style);
         },
 
         /**
-         * 创建现代化按钮
+         * 创建按钮
          */
         createButton(text, url, colorTheme, options = {}) {
             const { tooltip = '', isLoading = false, icon = '' } = options;
@@ -222,12 +187,23 @@
             btn.className = `bridge-btn ${isLoading ? 'loading' : ''}`;
 
             if (tooltip) {
-                btn.setAttribute('data-tooltip', tooltip);
+                btn.title = tooltip;  // 使用原生 title 属性
             }
 
-            // 设置渐变背景
-            btn.style.background = colorTheme.bg;
-            btn.style.boxShadow = `0 4px 15px ${colorTheme.shadow}, 0 2px 4px rgba(0,0,0,0.1)`;
+            // 设置纯色背景
+            btn.style.backgroundColor = colorTheme.bg;
+            btn.style.boxShadow = `0 4px 12px ${colorTheme.shadow}`;
+
+            // Hover 效果
+            btn.onmouseenter = () => {
+                btn.style.backgroundColor = colorTheme.bgHover;
+            };
+            btn.onmouseleave = () => {
+                btn.style.backgroundColor = colorTheme.bg;
+            };
+
+            // 保存颜色主题供后续更新使用
+            btn._colorTheme = colorTheme;
 
             // 内容
             if (isLoading) {
@@ -245,10 +221,21 @@
         updateButton(btn, text, colorTheme, options = {}) {
             const { icon = '', addSuccessAnimation = false } = options;
 
-            btn.style.background = colorTheme.bg;
-            btn.style.boxShadow = `0 4px 15px ${colorTheme.shadow}, 0 2px 4px rgba(0,0,0,0.1)`;
+            btn.style.backgroundColor = colorTheme.bg;
+            btn.style.boxShadow = `0 4px 12px ${colorTheme.shadow}`;
             btn.innerHTML = `${icon ? icon + ' ' : ''}${text}`;
             btn.classList.remove('loading');
+
+            // 更新 Hover 效果
+            btn.onmouseenter = () => {
+                btn.style.backgroundColor = colorTheme.bgHover;
+            };
+            btn.onmouseleave = () => {
+                btn.style.backgroundColor = colorTheme.bg;
+            };
+
+            // 保存新的颜色主题
+            btn._colorTheme = colorTheme;
 
             if (addSuccessAnimation) {
                 btn.classList.add('success');
@@ -458,20 +445,20 @@
                         icon: '▶',
                         addSuccessAnimation: !result.fromCache
                     });
-                    btnJavDB.setAttribute('data-tooltip', result.fromCache ? '从缓存加载' : '已找到详情页');
+                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
                 } else if (result.fallbackUrl) {
                     // 未找到但有搜索链接
                     btnJavDB.href = result.fallbackUrl;
                     StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
                         icon: '🔍'
                     });
-                    btnJavDB.setAttribute('data-tooltip', '未找到直达链接，点击搜索');
+                    btnJavDB.title = '未找到直达链接，点击搜索';
                 } else {
                     // 请求失败
                     StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
                         icon: '⚠️'
                     });
-                    btnJavDB.setAttribute('data-tooltip', result.error || '请求失败');
+                    btnJavDB.title = result.error || '请求失败';
                     // 点击重试
                     btnJavDB.onclick = (e) => {
                         e.preventDefault();
