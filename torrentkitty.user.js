@@ -6,6 +6,8 @@
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
+// @updateURL    https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/torrentkitty.user.js
+// @downloadURL  https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/torrentkitty.user.js
 // @grant        none
 // ==/UserScript==
 
