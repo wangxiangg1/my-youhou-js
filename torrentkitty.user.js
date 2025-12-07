@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      1.2
-// @description  TorrentKitty 增强：统一按钮风格、封面展示、可调节尺寸设置
+// @version      2.0
+// @description  TorrentKitty 增强：现代化UI、玻璃拟态风格、封面展示、可调节尺寸设置
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -34,54 +34,133 @@
         storageKey: 'torrentkitty_settings'
     };
 
-    // ==================== 颜色主题 ====================
+    // ==================== 现代化颜色主题 ====================
     const COLORS = {
-        // 主要操作按钮
-        primary: { bg: '#3b5998', border: '#2d4373', hover: '#4a6fb8' },      // JavDB
-        success: { bg: '#4CAF50', border: '#388E3C', hover: '#66BB6A' },      // 保存/打开
-        warning: { bg: '#ff9800', border: '#f57c00', hover: '#ffb74d' },      // 重置
-        danger: { bg: '#FF5722', border: '#D84315', hover: '#ff7043' },       // 下载
-        info: { bg: '#2196F3', border: '#1976D2', hover: '#42a5f5' },         // 详情
-        pink: { bg: '#d81b60', border: '#ad1457', hover: '#c2185b' },         // MissAV
-        neutral: { bg: '#666', border: '#444', hover: '#888' },               // 加载中/取消
-        // 错误提示
-        error: { bg: '#ffebee', border: '#f44336', text: '#c62828' },
-        noResult: { bg: '#fff3e0', border: '#ff9800', text: '#e65100' },
-        // 设置按钮渐变
-        settingsGradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)'
+        // 主题色 - 使用高级渐变色系
+        primary: {
+            bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
+            bgSolid: '#667eea',
+            border: 'rgba(102, 126, 234, 0.3)',
+            hover: 'linear-gradient(135deg, #764ba2 0%, #667eea 100%)',
+            shadow: 'rgba(102, 126, 234, 0.4)'
+        },
+        success: {
+            bg: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
+            bgSolid: '#11998e',
+            border: 'rgba(17, 153, 142, 0.3)',
+            hover: 'linear-gradient(135deg, #38ef7d 0%, #11998e 100%)',
+            shadow: 'rgba(56, 239, 125, 0.4)'
+        },
+        warning: {
+            bg: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
+            bgSolid: '#f093fb',
+            border: 'rgba(240, 147, 251, 0.3)',
+            hover: 'linear-gradient(135deg, #f5576c 0%, #f093fb 100%)',
+            shadow: 'rgba(245, 87, 108, 0.4)'
+        },
+        danger: {
+            bg: 'linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%)',
+            bgSolid: '#ff416c',
+            border: 'rgba(255, 65, 108, 0.3)',
+            hover: 'linear-gradient(135deg, #ff4b2b 0%, #ff416c 100%)',
+            shadow: 'rgba(255, 75, 43, 0.4)'
+        },
+        info: {
+            bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
+            bgSolid: '#4facfe',
+            border: 'rgba(79, 172, 254, 0.3)',
+            hover: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',
+            shadow: 'rgba(0, 242, 254, 0.4)'
+        },
+        pink: {
+            bg: 'linear-gradient(135deg, #f857a6 0%, #ff5858 100%)',
+            bgSolid: '#f857a6',
+            border: 'rgba(248, 87, 166, 0.3)',
+            hover: 'linear-gradient(135deg, #ff5858 0%, #f857a6 100%)',
+            shadow: 'rgba(255, 88, 88, 0.4)'
+        },
+        neutral: {
+            bg: 'linear-gradient(135deg, #bdc3c7 0%, #2c3e50 100%)',
+            bgSolid: '#7f8c8d',
+            border: 'rgba(127, 140, 141, 0.3)',
+            hover: 'linear-gradient(135deg, #2c3e50 0%, #bdc3c7 100%)',
+            shadow: 'rgba(44, 62, 80, 0.4)'
+        },
+
+        // 错误/提示框 - 玻璃拟态风格
+        error: {
+            bg: 'rgba(255, 82, 82, 0.1)',
+            border: 'rgba(255, 82, 82, 0.4)',
+            text: '#ff5252',
+            backdrop: 'blur(10px)'
+        },
+        noResult: {
+            bg: 'rgba(255, 193, 7, 0.1)',
+            border: 'rgba(255, 193, 7, 0.4)',
+            text: '#ffc107',
+            backdrop: 'blur(10px)'
+        },
+
+        // 设置按钮 - 流光渐变
+        settingsGradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f857a6 100%)',
+
+        // 玻璃效果
+        glass: {
+            bg: 'rgba(255, 255, 255, 0.1)',
+            border: 'rgba(255, 255, 255, 0.2)',
+            blur: '20px'
+        },
+
+        // 深色模式基础
+        dark: {
+            bg: 'rgba(15, 23, 42, 0.95)',
+            card: 'rgba(30, 41, 59, 0.9)',
+            text: '#f1f5f9',
+            textMuted: '#94a3b8'
+        }
     };
 
     // ==================== 样式工具函数 ====================
     const StyleUtils = {
         /**
-         * 生成按钮基础样式
+         * 生成现代化按钮样式 - 渐变背景、圆角、高级阴影
          */
         buttonBase(color, options = {}) {
             const {
-                padding = '3px 10px',
-                fontSize = '11px',
-                margin = '0 3px',
-                display = 'inline-block'
+                padding = '6px 14px',
+                fontSize = '12px',
+                margin = '0 4px',
+                display = 'inline-flex'
             } = options;
 
             return `
                 display: ${display};
+                align-items: center;
+                justify-content: center;
                 padding: ${padding};
-                background-color: ${color.bg};
+                background: ${color.bg};
                 color: #fff;
-                border-radius: 3px;
+                border-radius: 8px;
                 text-decoration: none;
                 font-size: ${fontSize};
-                font-family: Arial, sans-serif;
+                font-weight: 600;
+                font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
                 border: 1px solid ${color.border};
                 cursor: pointer;
                 margin: ${margin};
-                transition: background-color 0.2s;
+                box-shadow: 0 4px 15px ${color.shadow || 'rgba(0,0,0,0.2)'}, 
+                            0 1px 3px rgba(0,0,0,0.1),
+                            inset 0 1px 0 rgba(255,255,255,0.2);
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                text-shadow: 0 1px 2px rgba(0,0,0,0.2);
+                letter-spacing: 0.3px;
+                position: relative;
+                overflow: hidden;
             `;
         },
 
         /**
-         * 生成模态框遮罩层样式
+         * 生成玻璃拟态遮罩层样式
          */
         overlay() {
             return `
@@ -90,66 +169,218 @@
                 left: 0;
                 width: 100%;
                 height: 100%;
-                background: rgba(0, 0, 0, 0.7);
+                background: linear-gradient(135deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.95) 100%);
+                backdrop-filter: blur(8px);
+                -webkit-backdrop-filter: blur(8px);
                 z-index: 99999;
                 display: flex;
                 justify-content: center;
                 align-items: center;
+                animation: fadeIn 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             `;
         },
 
         /**
-         * 生成模态框面板样式
+         * 生成玻璃拟态模态框样式
          */
         modal(options = {}) {
             const {
                 maxWidth = '700px',
-                padding = '25px',
-                maxHeight = '80vh'
+                padding = '32px',
+                maxHeight = '85vh'
             } = options;
 
             return `
-                background: white;
+                background: linear-gradient(145deg, rgba(255, 255, 255, 0.95) 0%, rgba(248, 250, 252, 0.98) 100%);
+                backdrop-filter: blur(20px);
+                -webkit-backdrop-filter: blur(20px);
                 padding: ${padding};
-                border-radius: 8px;
-                box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+                border-radius: 20px;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.4),
+                            0 0 0 1px rgba(255, 255, 255, 0.1),
+                            inset 0 1px 1px rgba(255, 255, 255, 0.8);
                 max-width: ${maxWidth};
                 width: 90%;
                 max-height: ${maxHeight};
                 overflow: auto;
+                animation: slideIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+                border: 1px solid rgba(255, 255, 255, 0.3);
             `;
         },
 
         /**
-         * 生成错误/提示框样式
+         * 生成现代化提示框样式 - 玻璃拟态 + 柔和配色
          */
         infoBox(color, maxWidth) {
             return `
-                padding: 10px;
-                background-color: ${color.bg};
+                padding: 14px 18px;
+                background: ${color.bg};
+                backdrop-filter: ${color.backdrop || 'blur(10px)'};
+                -webkit-backdrop-filter: ${color.backdrop || 'blur(10px)'};
                 border: 1px solid ${color.border};
-                border-radius: 4px;
+                border-radius: 12px;
                 color: ${color.text};
-                font-size: 12px;
+                font-size: 13px;
+                font-weight: 500;
+                font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
                 cursor: pointer;
-                margin-top: 5px;
+                margin-top: 8px;
                 max-width: ${maxWidth}px;
+                box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1),
+                            0 2px 4px -1px rgba(0, 0, 0, 0.06);
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
             `;
         },
 
         /**
-         * 生成封面图片样式
+         * 生成封面图片样式 - 高级阴影 + 悬浮效果
          */
         coverImage(width, height) {
             return `
                 max-width: ${width}px;
                 max-height: ${height}px;
-                border-radius: 4px;
-                margin-top: 5px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+                border-radius: 12px;
+                margin-top: 8px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.3),
+                            0 4px 12px rgba(0,0,0,0.15),
+                            0 0 0 1px rgba(255,255,255,0.1);
                 cursor: pointer;
-                transition: transform 0.2s;
+                transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+                object-fit: cover;
             `;
+        },
+
+        /**
+         * 注入全局CSS动画
+         */
+        injectGlobalStyles() {
+            if (document.getElementById('tk-enhanced-styles')) return;
+
+            const style = document.createElement('style');
+            style.id = 'tk-enhanced-styles';
+            style.textContent = `
+                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+                
+                @keyframes fadeIn {
+                    from { opacity: 0; }
+                    to { opacity: 1; }
+                }
+                
+                @keyframes slideIn {
+                    from { 
+                        opacity: 0; 
+                        transform: translateY(-20px) scale(0.95); 
+                    }
+                    to { 
+                        opacity: 1; 
+                        transform: translateY(0) scale(1); 
+                    }
+                }
+                
+                @keyframes pulse {
+                    0%, 100% { transform: scale(1); }
+                    50% { transform: scale(1.05); }
+                }
+                
+                @keyframes shimmer {
+                    0% { background-position: -200% center; }
+                    100% { background-position: 200% center; }
+                }
+                
+                @keyframes float {
+                    0%, 100% { transform: translateY(0px); }
+                    50% { transform: translateY(-5px); }
+                }
+                
+                @keyframes glow {
+                    0%, 100% { box-shadow: 0 0 20px rgba(102, 126, 234, 0.4); }
+                    50% { box-shadow: 0 0 30px rgba(248, 87, 166, 0.6); }
+                }
+                
+                .tk-btn-hover:hover {
+                    transform: translateY(-2px) scale(1.02);
+                    filter: brightness(1.1);
+                }
+                
+                .tk-btn-hover:active {
+                    transform: translateY(0) scale(0.98);
+                }
+                
+                .tk-cover-hover:hover {
+                    transform: translateY(-8px) scale(1.03) rotate(1deg);
+                    box-shadow: 0 20px 60px rgba(0,0,0,0.4),
+                                0 8px 20px rgba(0,0,0,0.2);
+                }
+                
+                .tk-info-hover:hover {
+                    transform: translateY(-2px);
+                    box-shadow: 0 8px 16px -2px rgba(0, 0, 0, 0.15);
+                }
+                
+                .tk-settings-fab {
+                    animation: float 3s ease-in-out infinite, glow 2s ease-in-out infinite;
+                }
+                
+                .tk-settings-fab:hover {
+                    animation: none;
+                    transform: scale(1.15) rotate(180deg) !important;
+                }
+                
+                /* 滚动条美化 */
+                .tk-modal-scroll::-webkit-scrollbar {
+                    width: 8px;
+                }
+                
+                .tk-modal-scroll::-webkit-scrollbar-track {
+                    background: rgba(0,0,0,0.05);
+                    border-radius: 4px;
+                }
+                
+                .tk-modal-scroll::-webkit-scrollbar-thumb {
+                    background: linear-gradient(135deg, #667eea, #764ba2);
+                    border-radius: 4px;
+                }
+                
+                .tk-modal-scroll::-webkit-scrollbar-thumb:hover {
+                    background: linear-gradient(135deg, #764ba2, #667eea);
+                }
+                
+                /* 输入框聚焦效果 */
+                .tk-input-modern:focus {
+                    outline: none;
+                    border-color: #667eea;
+                    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+                }
+                
+                /* 滑块美化 */
+                .tk-slider {
+                    -webkit-appearance: none;
+                    width: 100%;
+                    height: 8px;
+                    border-radius: 4px;
+                    background: linear-gradient(90deg, #667eea, #764ba2);
+                    outline: none;
+                    cursor: pointer;
+                }
+                
+                .tk-slider::-webkit-slider-thumb {
+                    -webkit-appearance: none;
+                    width: 20px;
+                    height: 20px;
+                    border-radius: 50%;
+                    background: white;
+                    border: 2px solid #667eea;
+                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                    cursor: pointer;
+                    transition: all 0.2s;
+                }
+                
+                .tk-slider::-webkit-slider-thumb:hover {
+                    transform: scale(1.2);
+                    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+                }
+            `;
+            document.head.appendChild(style);
         }
     };
 
@@ -337,11 +568,13 @@
 
             if (url) {
                 btn.href = url;
-                btn.innerText = 'JavDB';
-                btn.style.backgroundColor = COLORS.primary.bg;
+                btn.innerText = '🎬 JavDB';
+                btn.style.background = COLORS.primary.bg;
+                btn.style.boxShadow = `0 4px 15px ${COLORS.primary.shadow}`;
             } else {
-                btn.innerText = '无结果';
-                btn.style.backgroundColor = COLORS.neutral.bg;
+                btn.innerText = '❌ 无结果';
+                btn.style.background = COLORS.neutral.bg;
+                btn.style.boxShadow = `0 4px 15px ${COLORS.neutral.shadow}`;
                 btn.href = '#';
                 btn.onclick = (e) => e.preventDefault();
             }
@@ -368,15 +601,11 @@
             const img = document.createElement('img');
 
             img.src = coverUrl;
-            img.className = 'javdb-cover-img';
+            img.className = 'javdb-cover-img tk-cover-hover';
             img.style.cssText = StyleUtils.coverImage(
                 state.settings.coverWidth,
                 state.settings.coverHeight
             );
-
-            // 悬停效果
-            img.onmouseover = () => img.style.transform = 'scale(1.05)';
-            img.onmouseout = () => img.style.transform = 'scale(1)';
 
             // 加载成功
             img.onload = () => {
@@ -406,8 +635,9 @@
         showErrorMessage(container, debugInfo) {
             container.innerHTML = '';
             const errorDiv = document.createElement('div');
+            errorDiv.className = 'tk-info-hover';
             errorDiv.style.cssText = StyleUtils.infoBox(COLORS.error, state.settings.coverWidth);
-            errorDiv.innerHTML = '⚠️ 封面加载失败<br><small>点击查看 Debug 信息</small>';
+            errorDiv.innerHTML = '⚠️ 封面加载失败<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
             errorDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
             container.appendChild(errorDiv);
         },
@@ -418,8 +648,9 @@
         showNoResultMessage(container, debugInfo) {
             container.innerHTML = '';
             const infoDiv = document.createElement('div');
+            infoDiv.className = 'tk-info-hover';
             infoDiv.style.cssText = StyleUtils.infoBox(COLORS.noResult, state.settings.coverWidth);
-            infoDiv.innerHTML = 'ℹ️ 未找到封面信息<br><small>点击查看 Debug 信息</small>';
+            infoDiv.innerHTML = 'ℹ️ 未找到封面信息<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
             infoDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
             container.appendChild(infoDiv);
         },
@@ -465,8 +696,9 @@
         createButton(text, color, onClick) {
             const btn = document.createElement('button');
             btn.innerText = text;
+            btn.className = 'tk-btn-hover';
             btn.style.cssText = StyleUtils.buttonBase(color, {
-                padding: '8px 20px',
+                padding: '10px 24px',
                 fontSize: '14px',
                 margin: '0'
             });
@@ -481,41 +713,56 @@
             const info = this.formatDebugInfo(debugInfo);
 
             const modal = document.createElement('div');
+            modal.className = 'tk-modal-scroll';
             modal.style.cssText = StyleUtils.modal();
 
-            // 标题
+            // 标题 - 渐变效果
             const title = document.createElement('h3');
-            title.innerText = '🔍 Debug 信息';
-            title.style.cssText = 'margin: 0 0 15px 0; color: #333; font-size: 18px;';
+            title.innerHTML = '🔍 <span style="background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Debug 信息</span>';
+            title.style.cssText = `
+                margin: 0 0 20px 0; 
+                color: #1e293b; 
+                font-size: 22px;
+                font-weight: 700;
+                font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                display: flex;
+                align-items: center;
+                gap: 8px;
+            `;
 
-            // 文本框
+            // 文本框 - 现代化样式
             const textarea = document.createElement('textarea');
             textarea.value = info;
             textarea.readOnly = true;
+            textarea.className = 'tk-input-modern';
             textarea.style.cssText = `
                 width: 100%;
-                height: 450px;
-                font-family: 'Courier New', monospace;
+                height: 420px;
+                font-family: 'JetBrains Mono', 'Fira Code', 'Consolas', monospace;
                 font-size: 13px;
-                padding: 12px;
-                border: 1px solid #ccc;
-                border-radius: 4px;
+                line-height: 1.6;
+                padding: 16px;
+                background: linear-gradient(145deg, #f8fafc, #f1f5f9);
+                border: 1px solid rgba(102, 126, 234, 0.2);
+                border-radius: 12px;
                 resize: vertical;
                 box-sizing: border-box;
+                color: #334155;
+                transition: all 0.3s ease;
             `;
 
             // 按钮容器
             const buttonContainer = document.createElement('div');
-            buttonContainer.style.cssText = 'margin-top: 15px; display: flex; gap: 10px; justify-content: flex-end;';
+            buttonContainer.style.cssText = 'margin-top: 20px; display: flex; gap: 12px; justify-content: flex-end;';
 
             buttonContainer.appendChild(
-                this.createButton('全选', COLORS.success, () => {
+                this.createButton('📋 全选', COLORS.success, () => {
                     textarea.select();
                     textarea.setSelectionRange(0, textarea.value.length);
                 })
             );
 
-            const closeBtn = this.createButton('关闭', COLORS.primary, null);
+            const closeBtn = this.createButton('✕ 关闭', COLORS.primary, null);
             buttonContainer.appendChild(closeBtn);
 
             modal.append(title, textarea, buttonContainer);
@@ -529,31 +776,38 @@
          * 格式化调试信息
          */
         formatDebugInfo(debugInfo) {
-            return `=== JavDB 封面加载 Debug 信息 ===
+            return `╔══════════════════════════════════════════════════════╗
+║         JavDB 封面加载 Debug 信息                    ║
+╚══════════════════════════════════════════════════════╝
 
-【番号】${debugInfo.code}
-【时间】${debugInfo.timestamp}
+┌─── 📋 基本信息 ───────────────────────────────────────
+│ 番号: ${debugInfo.code}
+│ 时间: ${debugInfo.timestamp}
+└───────────────────────────────────────────────────────
 
-【搜索请求】
-  URL: ${debugInfo.fetchUrl}
-  状态: ${debugInfo.fetchStatus}
+┌─── 🔍 搜索请求 ───────────────────────────────────────
+│ URL: ${debugInfo.fetchUrl}
+│ 状态: ${debugInfo.fetchStatus}
+└───────────────────────────────────────────────────────
 
-【搜索结果】
-  找到结果: ${debugInfo.foundResult ? '是' : '否'}
-  JavDB 页面: ${debugInfo.javdbUrl || '无'}
-  封面 ID: ${debugInfo.coverId || '无'}
+┌─── 📊 搜索结果 ───────────────────────────────────────
+│ 找到结果: ${debugInfo.foundResult ? '✅ 是' : '❌ 否'}
+│ JavDB 页面: ${debugInfo.javdbUrl || '无'}
+│ 封面 ID: ${debugInfo.coverId || '无'}
+└───────────────────────────────────────────────────────
 
-【封面图片】
-  URL: ${debugInfo.coverUrl || '无'}
-  加载成功: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '是' : '否') : '未尝试'}
-  图片尺寸: ${debugInfo.imageSize || '未知'}
-  图片错误: ${debugInfo.imageError || '无'}
+┌─── 🖼️ 封面图片 ───────────────────────────────────────
+│ URL: ${debugInfo.coverUrl || '无'}
+│ 加载成功: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '✅ 是' : '❌ 否') : '⏳ 未尝试'}
+│ 图片尺寸: ${debugInfo.imageSize || '未知'}
+│ 图片错误: ${debugInfo.imageError || '无'}
+└───────────────────────────────────────────────────────
 
-【错误信息】
-  ${debugInfo.errorMessage || '无'}
+┌─── ⚠️ 错误信息 ───────────────────────────────────────
+│ ${debugInfo.errorMessage || '无'}
+└───────────────────────────────────────────────────────
 
-=================================
-提示：可以全选复制此文本框内容进行反馈`;
+💡 提示：可以全选复制此文本框内容进行反馈`;
         },
 
         /**
@@ -561,30 +815,82 @@
          */
         showSettings() {
             const panel = document.createElement('div');
-            panel.style.cssText = StyleUtils.modal({ maxWidth: '450px', padding: '30px' });
+            panel.className = 'tk-modal-scroll';
+            panel.style.cssText = StyleUtils.modal({ maxWidth: '480px', padding: '36px' });
 
             panel.innerHTML = `
-                <h2 style="margin: 0 0 20px 0; color: #333; font-size: 20px;">
-                    ⚙️ 封面尺寸设置
+                <h2 style="
+                    margin: 0 0 28px 0; 
+                    font-size: 24px;
+                    font-weight: 700;
+                    font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                    display: flex;
+                    align-items: center;
+                    gap: 12px;
+                ">
+                    <span style="font-size: 28px;">⚙️</span>
+                    <span style="background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">封面尺寸设置</span>
                 </h2>
 
-                <div style="margin-bottom: 20px;">
-                    <label style="display: block; margin-bottom: 8px; color: #555; font-size: 14px;">
-                        宽度：<span id="width-value">${state.settings.coverWidth}</span>px
-                    </label>
-                    <input type="range" id="width-slider" min="100" max="800" 
-                           value="${state.settings.coverWidth}" style="width: 100%; cursor: pointer;">
+                <div style="
+                    background: linear-gradient(145deg, #f8fafc, #f1f5f9);
+                    border-radius: 16px;
+                    padding: 24px;
+                    margin-bottom: 24px;
+                    border: 1px solid rgba(102, 126, 234, 0.1);
+                ">
+                    <div style="margin-bottom: 28px;">
+                        <label style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            margin-bottom: 12px; 
+                            color: #475569; 
+                            font-size: 15px;
+                            font-weight: 600;
+                            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                        ">
+                            <span>📐 宽度</span>
+                            <span style="
+                                background: linear-gradient(135deg, #667eea, #764ba2);
+                                color: white;
+                                padding: 4px 12px;
+                                border-radius: 20px;
+                                font-size: 13px;
+                                font-weight: 700;
+                            "><span id="width-value">${state.settings.coverWidth}</span>px</span>
+                        </label>
+                        <input type="range" id="width-slider" class="tk-slider" min="100" max="800" 
+                               value="${state.settings.coverWidth}">
+                    </div>
+
+                    <div>
+                        <label style="
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            margin-bottom: 12px; 
+                            color: #475569; 
+                            font-size: 15px;
+                            font-weight: 600;
+                            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                        ">
+                            <span>📏 高度</span>
+                            <span style="
+                                background: linear-gradient(135deg, #667eea, #764ba2);
+                                color: white;
+                                padding: 4px 12px;
+                                border-radius: 20px;
+                                font-size: 13px;
+                                font-weight: 700;
+                            "><span id="height-value">${state.settings.coverHeight}</span>px</span>
+                        </label>
+                        <input type="range" id="height-slider" class="tk-slider" min="100" max="600" 
+                               value="${state.settings.coverHeight}">
+                    </div>
                 </div>
 
-                <div style="margin-bottom: 25px;">
-                    <label style="display: block; margin-bottom: 8px; color: #555; font-size: 14px;">
-                        高度：<span id="height-value">${state.settings.coverHeight}</span>px
-                    </label>
-                    <input type="range" id="height-slider" min="100" max="600" 
-                           value="${state.settings.coverHeight}" style="width: 100%; cursor: pointer;">
-                </div>
-
-                <div id="settings-buttons" style="display: flex; gap: 10px; justify-content: flex-end;"></div>
+                <div id="settings-buttons" style="display: flex; gap: 12px; justify-content: flex-end;"></div>
             `;
 
             const overlay = this.createOverlay(panel);
@@ -607,7 +913,7 @@
 
             // 重置按钮
             buttonsContainer.appendChild(
-                this.createButton('重置默认', COLORS.warning, () => {
+                this.createButton('🔄 重置', COLORS.warning, () => {
                     widthSlider.value = CONFIG.defaults.coverWidth;
                     heightSlider.value = CONFIG.defaults.coverHeight;
                     widthValue.textContent = CONFIG.defaults.coverWidth;
@@ -617,7 +923,7 @@
 
             // 保存按钮
             buttonsContainer.appendChild(
-                this.createButton('保存', COLORS.success, () => {
+                this.createButton('✓ 保存', COLORS.success, () => {
                     state.settings.coverWidth = parseInt(widthSlider.value);
                     state.settings.coverHeight = parseInt(heightSlider.value);
                     SettingsManager.save();
@@ -628,7 +934,7 @@
 
             // 取消按钮
             buttonsContainer.appendChild(
-                this.createButton('取消', COLORS.neutral, () => overlay.remove())
+                this.createButton('✕ 取消', COLORS.neutral, () => overlay.remove())
             );
         }
     };
@@ -636,34 +942,32 @@
     // ==================== 按钮工厂 ====================
     const ButtonFactory = {
         /**
-         * 创建带悬停效果的链接按钮
+         * 创建现代化链接按钮
          */
         createLinkButton(text, href, color, className) {
             const btn = document.createElement('a');
             btn.href = href;
             btn.target = '_blank';
             btn.innerText = text;
-            btn.className = className;
-            btn.style.cssText = StyleUtils.buttonBase(color, { margin: '0 0 0 6px' });
-
-            btn.onmouseover = () => btn.style.backgroundColor = color.hover;
-            btn.onmouseout = () => btn.style.backgroundColor = color.bg;
+            btn.className = `${className} tk-btn-hover`;
+            btn.style.cssText = StyleUtils.buttonBase(color, { margin: '0 0 0 8px' });
 
             return btn;
         },
 
         /**
-         * 创建设置悬浮按钮
+         * 创建现代化设置悬浮按钮 (FAB)
          */
         createSettingsButton() {
             const btn = document.createElement('div');
+            btn.className = 'tk-settings-fab';
             btn.innerHTML = '⚙️';
             btn.style.cssText = `
                 position: fixed;
-                bottom: 30px;
-                right: 30px;
-                width: 50px;
-                height: 50px;
+                bottom: 32px;
+                right: 32px;
+                width: 60px;
+                height: 60px;
                 background: ${COLORS.settingsGradient};
                 color: white;
                 border-radius: 50%;
@@ -671,14 +975,15 @@
                 justify-content: center;
                 align-items: center;
                 cursor: pointer;
-                font-size: 24px;
-                box-shadow: 0 4px 15px rgba(0,0,0,0.3);
+                font-size: 28px;
+                box-shadow: 0 8px 32px rgba(102, 126, 234, 0.5),
+                            0 4px 12px rgba(0,0,0,0.15),
+                            inset 0 2px 0 rgba(255,255,255,0.2);
                 z-index: 9999;
-                transition: all 0.3s;
+                transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+                border: 2px solid rgba(255,255,255,0.2);
             `;
 
-            btn.onmouseover = () => btn.style.transform = 'scale(1.1) rotate(90deg)';
-            btn.onmouseout = () => btn.style.transform = 'scale(1) rotate(0deg)';
             btn.onclick = () => ModalManager.showSettings();
 
             document.body.appendChild(btn);
@@ -766,7 +1071,7 @@
 
             // 创建 JavDB 按钮
             const javdbBtn = ButtonFactory.createLinkButton(
-                '加载中...',
+                '⏳ 加载中',
                 '#',
                 COLORS.neutral,
                 'javdb-btn'
@@ -776,9 +1081,32 @@
             // 创建封面容器
             const coverContainer = document.createElement('div');
             coverContainer.className = 'javdb-cover-container';
-            coverContainer.style.cssText = 'margin-top: 5px; font-size: 10px; color: #999;';
-            coverContainer.innerText = '封面加载中...';
+            coverContainer.style.cssText = `
+                margin-top: 10px; 
+                font-size: 13px; 
+                color: #64748b;
+                font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                padding: 12px 16px;
+                background: linear-gradient(145deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.05));
+                border-radius: 10px;
+                border: 1px solid rgba(102, 126, 234, 0.15);
+                display: inline-block;
+            `;
+            coverContainer.innerHTML = `
+                <span style="display: inline-flex; align-items: center; gap: 8px;">
+                    <span style="display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(102, 126, 234, 0.3); border-top-color: #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></span>
+                    <span>封面加载中...</span>
+                </span>
+            `;
             parent.appendChild(coverContainer);
+
+            // 注入旋转动画（如果未注入）
+            if (!document.getElementById('tk-spin-animation')) {
+                const spinStyle = document.createElement('style');
+                spinStyle.id = 'tk-spin-animation';
+                spinStyle.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
+                document.head.appendChild(spinStyle);
+            }
 
             // 加入请求队列
             QueueManager.add({ code, row });
@@ -788,8 +1116,18 @@
          * 初始化
          */
         init() {
+            // 注入全局CSS样式
+            StyleUtils.injectGlobalStyles();
+
             // 加载设置
             SettingsManager.load();
+
+            // 输出版本信息
+            console.log(
+                '%c✨ TorrentKitty Enhanced v2.0 %c已加载',
+                'background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
+                'background: #38ef7d; color: #1e293b; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
+            );
 
             // 页面加载完成后执行
             window.addEventListener('load', () => {
