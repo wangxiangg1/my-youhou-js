@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.0
+// @version      2.1
 // @description  TorrentKitty 增强：现代化UI、玻璃拟态风格、封面展示、可调节尺寸设置
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -28,8 +28,10 @@
         },
         // 轮询间隔
         pollInterval: 2000,
-        // 正则表达式
-        codeRegex: /([a-zA-Z]{2,5}-\d{3,5})/i,
+        // 正则表达式 - 支持多种番号格式
+        // 格式1: ABC-123 (带连字符)
+        // 格式2: ABC123 (不带连字符)
+        codeRegex: /([a-zA-Z]{2,6}-?\d{3,5})/i,
         // 存储键名
         storageKey: 'torrentkitty_settings'
     };
@@ -1034,7 +1036,12 @@
                 const match = rowText.match(CONFIG.codeRegex);
 
                 if (match) {
-                    const code = match[1].toUpperCase();
+                    // 格式化番号：将 CLA314 转换为 CLA-314
+                    let code = match[1].toUpperCase();
+                    if (!code.includes('-')) {
+                        // 找到字母和数字的分界点，插入连字符
+                        code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
+                    }
                     this.enhanceRow(row, code);
                 }
             });
@@ -1124,7 +1131,7 @@
 
             // 输出版本信息
             console.log(
-                '%c✨ TorrentKitty Enhanced v2.0 %c已加载',
+                '%c✨ TorrentKitty Enhanced v2.1 %c已加载',
                 'background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: #38ef7d; color: #1e293b; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
