@@ -9,6 +9,8 @@
 // @match        https://missav.com/*
 // @match        https://missav.ai/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=javdb.com
+// @updateURL    https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/j-m.js
+// @downloadURL  https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/j-m.js
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
