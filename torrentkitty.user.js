@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.5
+// @version      2.1
 // @description  TorrentKitty 增强：现代化UI、玻璃拟态风格、封面展示、可调节尺寸设置
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -24,8 +24,8 @@
 // @match        *://torrentkitty.one/*
 // @match        *://www.torrentkitty.dev/*
 // @match        *://torrentkitty.dev/*
-// @updateURL    https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/torrentkitty.user.js
-// @downloadURL  https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/torrentkitty.user.js
+// @updateURL    https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
+// @downloadURL  https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
 // @grant        none
 // ==/UserScript==
 
