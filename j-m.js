@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.3
+// @version      4.4
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -284,21 +284,35 @@
     const CodeExtractor = {
         /**
          * 从 MissAV URL 提取番号
-         * 仅在 URL 形如 /cn/ABP-123 或 /ABP-123 时认为是详情页
+         *
+         * 逻辑：
+         *  - 取路径最后一段作为候选（例如 /dm59/cn/hnd-661 -> hnd-661）
+         *  - 中间路径如果包含 search / tag / genre / series / actress 等则直接忽略（避免搜索页等误判）
+         *  - 最后一段需匹配 类似 HND-661 / SIMF005 / ABP123 这种格式
          */
         fromMissAVUrl() {
             // 去掉查询参数和 hash
-            const path = window.location.pathname.split('?')[0].split('#')[0];
+            const rawPath = window.location.pathname.split('?')[0].split('#')[0];
 
-            // 移除语言代码 (如 /cn/)
-            const cleanPath = path.replace(/^\/(cn|en|ja|ko|tw)\//i, '/');
+            // 拆分路径段，过滤掉空字符串
+            const segments = rawPath.split('/').filter(Boolean);
+            if (segments.length === 0) return null;
 
-            // 只允许一个路径段，例如：/abp-123 或 /ABP123
-            const match = cleanPath.match(/^\/([a-zA-Z0-9]+-?\d+)(?:\/)?$/);
-            if (match) {
-                return match[1].toUpperCase();
+            // 中间如果含有这些关键字，说明是搜索/标签等页面，直接不处理
+            const blockList = ['search', 'tag', 'genre', 'series', 'actress', 'director', 'label', 'maker'];
+            if (segments.some(seg => blockList.includes(seg.toLowerCase()))) {
+                return null;
             }
-            return null;
+
+            // 一些站点会在最前面加环境前缀，比如 dm59、i59 等，这里无须刻意处理，只看最后一段
+            const lastSeg = segments[segments.length - 1];
+
+            // 最后一段必须是形如 ABP-123 / HND661 / SIMF005 这种“字母数字 + 可选 - + 数字”
+            if (!/^[a-zA-Z0-9]+-?\d+$/i.test(lastSeg)) {
+                return null;
+            }
+
+            return lastSeg.toUpperCase();
         },
 
         /**
@@ -437,8 +451,8 @@
             container.appendChild(btnJavDB);
             titleElement.appendChild(container);
 
-            // 发起请求获取真实链接
-            JavDBService.fetchRealUrl(code, (result) => {
+            // 把回调单独拿出来，避免 use strict 下的 arguments.callee 问题
+            const handleResult = (result) => {
                 if (result.success) {
                     // 成功获取直达链接
                     btnJavDB.href = result.url;
@@ -447,6 +461,7 @@
                         addSuccessAnimation: !result.fromCache
                     });
                     btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
+                    btnJavDB.onclick = null;
                 } else if (result.fallbackUrl) {
                     // 未找到但有搜索链接
                     btnJavDB.href = result.fallbackUrl;
@@ -454,6 +469,7 @@
                         icon: '🔍'
                     });
                     btnJavDB.title = '未找到直达链接，点击搜索';
+                    btnJavDB.onclick = null;
                 } else {
                     // 请求失败
                     StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
@@ -466,10 +482,13 @@
                         StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading);
                         btnJavDB.classList.add('loading');
                         btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        JavDBService.fetchRealUrl(code, arguments.callee);
+                        JavDBService.fetchRealUrl(code, handleResult);
                     };
                 }
-            });
+            };
+
+            // 发起请求获取真实链接
+            JavDBService.fetchRealUrl(code, handleResult);
 
             console.log(`[Bridge] MissAV 页面增强完成: ${code}`);
         }
@@ -483,7 +502,7 @@
 
             // 输出版本信息
             console.log(
-                '%c🔗 JavDB & MissAV Bridge v4.3 %c已加载',
+                '%c🔗 JavDB & MissAV Bridge v4.4 %c已加载',
                 'background: linear-gradient(135deg, #f39c12, #e67e22); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: linear-gradient(135deg, #f857a6, #ff5858); color: white; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
