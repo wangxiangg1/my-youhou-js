@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -284,18 +284,19 @@
     const CodeExtractor = {
         /**
          * 从 MissAV URL 提取番号
-         * URL 格式: https://missav.ws/cn/xxxx-123
+         * 仅在 URL 形如 /cn/ABP-123 或 /ABP-123 时认为是详情页
          */
         fromMissAVUrl() {
-            const path = window.location.pathname;
+            // 去掉查询参数和 hash
+            const path = window.location.pathname.split('?')[0].split('#')[0];
+
             // 移除语言代码 (如 /cn/)
             const cleanPath = path.replace(/^\/(cn|en|ja|ko|tw)\//i, '/');
-            const segments = cleanPath.split('/').filter(Boolean);
-            const code = segments[segments.length - 1];
 
-            // 验证是否是有效番号格式
-            if (code && /^[a-zA-Z]+-?\d+/i.test(code)) {
-                return code.toUpperCase();
+            // 只允许一个路径段，例如：/abp-123 或 /ABP123
+            const match = cleanPath.match(/^\/([a-zA-Z0-9]+-?\d+)(?:\/)?$/);
+            if (match) {
+                return match[1].toUpperCase();
             }
             return null;
         },
@@ -462,7 +463,7 @@
                     // 点击重试
                     btnJavDB.onclick = (e) => {
                         e.preventDefault();
-                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
+                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading);
                         btnJavDB.classList.add('loading');
                         btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
                         JavDBService.fetchRealUrl(code, arguments.callee);
@@ -482,7 +483,7 @@
 
             // 输出版本信息
             console.log(
-                '%c🔗 JavDB & MissAV Bridge v4.0 %c已加载',
+                '%c🔗 JavDB & MissAV Bridge v4.3 %c已加载',
                 'background: linear-gradient(135deg, #f39c12, #e67e22); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: linear-gradient(135deg, #f857a6, #ff5858); color: white; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
