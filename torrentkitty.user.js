@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.2
-// @description  TorrentKitty 增强：现代化UI、玻璃拟态风格、封面展示、可调节尺寸设置
+// @version      2.3
+// @description  TorrentKitty 增强：现代化UI、玻璃拟态风格、封面展示、智能速率限制、防封禁优化
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -39,13 +39,17 @@
             coverWidth: 400,
             coverHeight: 300
         },
-        // 请求队列配置
+        // 请求队列配置 - 防止IP被封禁的保守设置
         queue: {
-            delay: 500,           // 请求间隔(ms)
-            maxConcurrent: 1      // 最大并发数
+            baseDelay: 2000,      // 基础请求间隔(ms) - 从500ms提升到2000ms
+            randomDelay: 2000,    // 随机延迟范围(ms) - 实际延迟为 baseDelay + 0~randomDelay
+            maxConcurrent: 1,     // 最大并发数
+            maxRequestsPerMinute: 15,  // 每分钟最大请求数
+            errorBackoff: 5000,   // 错误退避时间(ms)
+            maxBackoff: 60000     // 最大退避时间(ms)
         },
-        // 轮询间隔
-        pollInterval: 2000,
+        // 轮询间隔 - 从2秒改为10秒
+        pollInterval: 10000,
         // 正则表达式 - 支持多种番号格式
         // 格式1: ABC-123 (带连字符)
         // 格式2: ABC123 (不带连字符)
@@ -410,7 +414,11 @@
         requestQueue: [],
         isProcessing: false,
         settings: { ...CONFIG.defaults },
-        intervalId: null
+        intervalId: null,
+        // 速率限制追踪
+        requestTimestamps: [],  // 记录最近的请求时间戳
+        currentBackoff: 0,      // 当前退避时间
+        consecutiveErrors: 0    // 连续错误计数
     };
 
     // ==================== 设置管理 ====================
@@ -443,22 +451,94 @@
             this.process();
         },
 
+        /**
+         * 计算下一次请求的延迟时间
+         */
+        getNextDelay() {
+            const { baseDelay, randomDelay, errorBackoff, maxBackoff } = CONFIG.queue;
+
+            // 基础延迟 + 随机延迟
+            let delay = baseDelay + Math.random() * randomDelay;
+
+            // 如果有退避，使用退避时间
+            if (state.currentBackoff > 0) {
+                delay = Math.max(delay, state.currentBackoff);
+            }
+
+            return Math.min(delay, maxBackoff);
+        },
+
+        /**
+         * 检查是否超过速率限制
+         */
+        isRateLimited() {
+            const now = Date.now();
+            const oneMinuteAgo = now - 60000;
+
+            // 清理过期的时间戳
+            state.requestTimestamps = state.requestTimestamps.filter(ts => ts > oneMinuteAgo);
+
+            // 检查是否超过每分钟限制
+            return state.requestTimestamps.length >= CONFIG.queue.maxRequestsPerMinute;
+        },
+
+        /**
+         * 记录请求时间戳
+         */
+        recordRequest() {
+            state.requestTimestamps.push(Date.now());
+        },
+
+        /**
+         * 处理错误退避
+         */
+        handleError() {
+            state.consecutiveErrors++;
+            // 指数退避：5s, 10s, 20s, 40s... 最大60s
+            state.currentBackoff = Math.min(
+                CONFIG.queue.errorBackoff * Math.pow(2, state.consecutiveErrors - 1),
+                CONFIG.queue.maxBackoff
+            );
+            console.warn(`[TorrentKitty] 请求错误，退避 ${state.currentBackoff / 1000} 秒`);
+        },
+
+        /**
+         * 重置错误状态
+         */
+        resetError() {
+            state.consecutiveErrors = 0;
+            state.currentBackoff = 0;
+        },
+
         async process() {
             if (state.isProcessing || state.requestQueue.length === 0) return;
+
+            // 检查速率限制
+            if (this.isRateLimited()) {
+                console.log('[TorrentKitty] 达到速率限制，等待中...');
+                setTimeout(() => this.process(), 5000);
+                return;
+            }
 
             state.isProcessing = true;
             const task = state.requestQueue.shift();
 
             try {
+                this.recordRequest();
                 await JavDBService.fetchInfo(task.code, task.row);
+                this.resetError(); // 成功后重置错误状态
             } catch (e) {
                 console.error('[TorrentKitty] 队列处理错误:', e);
+                this.handleError();
             }
+
+            const delay = this.getNextDelay();
+            console.log(`[TorrentKitty] 下次请求延迟: ${(delay / 1000).toFixed(1)}s`);
 
             setTimeout(() => {
                 state.isProcessing = false;
                 this.process();
-            }, CONFIG.queue.delay);
+            }, delay);
         }
     };
 
@@ -492,11 +572,29 @@
                 const response = await fetch(searchUrl);
                 debugInfo.fetchStatus = `HTTP ${response.status} ${response.statusText}`;
 
+                // 检测速率限制和封禁
+                if (response.status === 429) {
+                    debugInfo.errorMessage = '⚠️ 请求过于频繁 (429 Too Many Requests)';
+                    throw new Error('RATE_LIMITED'); // 触发退避
+                }
+                
+                if (response.status === 403) {
+                    debugInfo.errorMessage = '🚫 IP可能被封禁 (403 Forbidden)';
+                    throw new Error('IP_BANNED'); // 触发退避
+                }
+
                 if (!response.ok) {
                     throw new Error(`HTTP ${response.status}`);
                 }
 
                 const html = await response.text();
+                
+                // 检查是否被重定向到验证页面
+                if (html.includes('cf-challenge') || html.includes('captcha')) {
+                    debugInfo.errorMessage = '🤖 检测到验证码/Cloudflare挑战';
+                    throw new Error('CAPTCHA_DETECTED');
+                }
+                
                 const result = this.parseSearchResult(html);
 
                 if (result) {
@@ -511,9 +609,14 @@
                     state.javdbCache[code] = { url: null, coverId: null, debugInfo };
                 }
             } catch (error) {
-                debugInfo.errorMessage = error.message || String(error);
+                debugInfo.errorMessage = debugInfo.errorMessage || error.message || String(error);
                 console.error('[TorrentKitty] JavDB 请求错误:', error);
                 state.javdbCache[code] = { url: null, coverId: null, debugInfo };
+                
+                // 仅对速率限制相关错误重新抛出，触发退避机制
+                if (['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message)) {
+                    throw error;
+                }
             }
 
             UIUpdater.updateRow(row, code, debugInfo);
