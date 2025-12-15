@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.6
+// @version      2.7
 // @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、localStorage持久化缓存
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
