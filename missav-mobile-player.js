@@ -8,6 +8,8 @@
 // @match        https://missav.com/*
 // @match        https://missav.ai/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=missav.ws
+// @updateURL    https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/missav-mobile-player.js
+// @downloadURL  https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/missav-mobile-player.js
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @run-at       document-idle
