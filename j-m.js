@@ -14,6 +14,7 @@
 // @grant        GM_xmlhttpRequest
 // @grant        GM_setValue
 // @grant        GM_getValue
+// @grant        GM_deleteValue
 // @connect      javdb.com
 // ==/UserScript==
 
@@ -22,12 +23,19 @@
 
     // ==================== 配置常量 ====================
     const CONFIG = {
-        // 缓存过期时间 (24小时)
-        cacheExpiry: 24 * 60 * 60 * 1000,
+        // 正常缓存过期时间 (7天)
+        cacheExpiry: 7 * 24 * 60 * 60 * 1000,
+        // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
+        negativeCacheExpiry: 24 * 60 * 60 * 1000,
+        // 负缓存标记
+        NOT_FOUND_MARKER: '__NOT_FOUND__',
         // 请求超时时间 (10秒)
         requestTimeout: 10000,
-        // MissAV 基础 URL
-        missavBaseUrl: 'https://missav.ws/cn',
+        // MissAV 基础 URL (动态获取)
+        get missavBaseUrl() {
+            const stored = GM_getValue('missav_origin');
+            return stored ? `${stored}/cn` : 'https://missav.ws/cn';
+        },
         // JavDB 基础 URL
         javdbBaseUrl: 'https://javdb.com',
         // 缓存键前缀
@@ -85,8 +93,8 @@
             const style = document.createElement('style');
             style.id = 'bridge-styles';
             style.textContent = `
-                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@500;600;700&display=swap');
-
+                @import url('https://fonts.cdnfonts.com/css/harmonyos-sans');
+                
                 @keyframes bridge-spin {
                     to { transform: rotate(360deg); }
                 }
@@ -117,7 +125,7 @@
                     border-radius: 6px;
                     font-size: 13px;
                     font-weight: 700;
-                    font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                    font-family: 'HarmonyOS Sans', 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                     text-decoration: none;
                     cursor: pointer;
                     border: none;
@@ -248,15 +256,23 @@
     const CacheManager = {
         /**
          * 获取缓存
+         * @returns {object|null} { url, isNegative } 或 null（无缓存/已过期）
          */
         get(code) {
+            const cacheKey = CONFIG.cachePrefix + code;
             try {
-                const cached = GM_getValue(CONFIG.cachePrefix + code);
+                const cached = GM_getValue(cacheKey);
                 if (cached) {
-                    const { url, timestamp } = JSON.parse(cached);
+                    const { url, timestamp, isNegative } = JSON.parse(cached);
+                    // 根据缓存类型选择过期时间
+                    const expiry = isNegative ? CONFIG.negativeCacheExpiry : CONFIG.cacheExpiry;
                     // 检查是否过期
-                    if (Date.now() - timestamp < CONFIG.cacheExpiry) {
-                        return url;
+                    if (Date.now() - timestamp < expiry) {
+                        return { url, isNegative: !!isNegative };
+                    } else {
+                        // 惰性删除：过期时物理删除该条目
+                        GM_deleteValue(cacheKey);
+                        console.log(`[Bridge] 缓存已过期并删除: ${code}`);
                     }
                 }
             } catch (e) {
@@ -266,16 +282,33 @@
         },
 
         /**
-         * 设置缓存
+         * 设置正常缓存（找到了结果）
          */
         set(code, url) {
             try {
                 GM_setValue(CONFIG.cachePrefix + code, JSON.stringify({
                     url: url,
-                    timestamp: Date.now()
+                    timestamp: Date.now(),
+                    isNegative: false
                 }));
             } catch (e) {
                 console.error('[Bridge] 缓存写入错误:', e);
+            }
+        },
+
+        /**
+         * 设置负缓存（搜索无结果，非网络错误）
+         */
+        setNotFound(code) {
+            try {
+                GM_setValue(CONFIG.cachePrefix + code, JSON.stringify({
+                    url: CONFIG.NOT_FOUND_MARKER,
+                    timestamp: Date.now(),
+                    isNegative: true
+                }));
+                console.log(`[Bridge] 负缓存已存储: ${code} (24小时内不再请求)`);
+            } catch (e) {
+                console.error('[Bridge] 负缓存写入错误:', e);
             }
         }
     };
@@ -328,10 +361,18 @@
          */
         fetchRealUrl(code, callback) {
             // 先检查缓存
-            const cachedUrl = CacheManager.get(code);
-            if (cachedUrl) {
-                console.log(`[Bridge] 使用缓存: ${code} -> ${cachedUrl}`);
-                callback({ success: true, url: cachedUrl, fromCache: true });
+            const cached = CacheManager.get(code);
+            if (cached) {
+                if (cached.isNegative) {
+                    // 负缓存：之前搜索过但没找到
+                    console.log(`[Bridge] 负缓存命中: ${code} (JavDB无此资源)`);
+                    const searchUrl = `${CONFIG.javdbBaseUrl}/search?q=${code}&f=all`;
+                    callback({ success: false, fallbackUrl: searchUrl, fromCache: true });
+                    return;
+                }
+                // 正常缓存
+                console.log(`[Bridge] 缓存命中: ${code} -> ${cached.url}`);
+                callback({ success: true, url: cached.url, fromCache: true });
                 return;
             }
 
@@ -353,11 +394,13 @@
                             const href = firstResult.getAttribute('href');
                             const realUrl = `${CONFIG.javdbBaseUrl}${href}`;
 
-                            // 写入缓存
+                            // 写入正常缓存
                             CacheManager.set(code, realUrl);
 
                             callback({ success: true, url: realUrl });
                         } else {
+                            // 搜索成功但无结果 -> 写入负缓存
+                            CacheManager.setNotFound(code);
                             callback({ success: false, fallbackUrl: searchUrl });
                         }
                     } else {
@@ -409,7 +452,10 @@
             container.appendChild(btnSearch);
             targetBlock.appendChild(container);
 
-            console.log(`[Bridge] JavDB 页面增强完成: ${code}`);
+            // P0: 反向预热 - 将当前页面信息写入缓存
+            // 这样下次在 MissAV 遇到相同番号时，无需发起网络请求
+            CacheManager.set(code, window.location.href);
+            console.log(`[Bridge] JavDB 页面增强完成: ${code} (已预热缓存)`);
         },
 
         /**
@@ -436,8 +482,8 @@
             container.appendChild(btnJavDB);
             titleElement.appendChild(container);
 
-            // 发起请求获取真实链接
-            JavDBService.fetchRealUrl(code, (result) => {
+            // 定义回调函数（用于重试时递归调用）
+            const handleFetchResult = (result) => {
                 if (result.success) {
                     // 成功获取直达链接
                     btnJavDB.href = result.url;
@@ -446,6 +492,7 @@
                         addSuccessAnimation: !result.fromCache
                     });
                     btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
+                    btnJavDB.onclick = null; // 清除重试事件
                 } else if (result.fallbackUrl) {
                     // 未找到但有搜索链接
                     btnJavDB.href = result.fallbackUrl;
@@ -453,6 +500,7 @@
                         icon: '🔍'
                     });
                     btnJavDB.title = '未找到直达链接，点击搜索';
+                    btnJavDB.onclick = null; // 清除重试事件
                 } else {
                     // 请求失败
                     StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
@@ -465,10 +513,14 @@
                         StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
                         btnJavDB.classList.add('loading');
                         btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        JavDBService.fetchRealUrl(code, arguments.callee);
+                        // 使用命名函数进行递归重试
+                        JavDBService.fetchRealUrl(code, handleFetchResult);
                     };
                 }
-            });
+            };
+
+            // 发起请求获取真实链接
+            JavDBService.fetchRealUrl(code, handleFetchResult);
 
             console.log(`[Bridge] MissAV 页面增强完成: ${code}`);
         }
@@ -482,21 +534,21 @@
 
             // 输出版本信息
             console.log(
-                '%c🔗 JavDB & MissAV Bridge v4.0 %c已加载',
+                '%c🔗 JavDB & MissAV Bridge v4.2 %c已加载',
                 'background: linear-gradient(135deg, #f39c12, #e67e22); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: linear-gradient(135deg, #f857a6, #ff5858); color: white; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
 
-            // 页面加载完成后执行
-            window.addEventListener('load', () => {
-                const currentUrl = window.location.href;
+            // 直接执行（Tampermonkey 注入时 DOM 已就绪，无需等待 load 事件）
+            const currentUrl = window.location.href;
 
-                if (currentUrl.includes('javdb.com')) {
-                    PageHandler.handleJavDB();
-                } else if (currentUrl.includes('missav')) {
-                    PageHandler.handleMissAV();
-                }
-            });
+            if (currentUrl.includes('javdb.com')) {
+                PageHandler.handleJavDB();
+            } else if (currentUrl.includes('missav')) {
+                // 记录当前 MissAV 域名偏好
+                GM_setValue('missav_origin', window.location.origin);
+                PageHandler.handleMissAV();
+            }
         }
     };
 
