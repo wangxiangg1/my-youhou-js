@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.7
+// @version      2.8
 // @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、localStorage持久化缓存
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -1450,7 +1450,7 @@
 
             // 输出版本信息
             console.log(
-                '%c✨ TorrentKitty Enhanced v2.6 %c已加载',
+                '%c✨ TorrentKitty Enhanced v2.8 %c已加载',
                 'background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: #38ef7d; color: #1e293b; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
