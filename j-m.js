@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
