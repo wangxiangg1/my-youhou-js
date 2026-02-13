@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.8
-// @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、localStorage持久化缓存
+// @version      2.9
+// @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、localStorage持久化缓存、支持东热番号、刷新重试功能
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -60,7 +60,8 @@
         // 正则表达式 - 支持多种番号格式
         // 格式1: ABC-123 (带连字符)
         // 格式2: ABC123 (不带连字符)
-        codeRegex: /([a-zA-Z]{2,6}-?\d{3,5})/i,
+        // 格式3: n1234 (东热番号，单字母n + 4位数字)
+        codeRegex: /([a-zA-Z]{1,6}-?\d{3,5})/i,
         // 存储键名
         storageKey: 'torrentkitty_settings'
     };
@@ -624,6 +625,21 @@
          */
         size() {
             return state.cacheOrder.length;
+        },
+
+        /**
+         * 删除指定番号的缓存
+         */
+        remove(code) {
+            // 从内存删除
+            delete state.javdbCache[code];
+            // 从缓存顺序中删除
+            state.cacheOrder = state.cacheOrder.filter(item => item.code !== code);
+            // 从 localStorage 删除
+            localStorage.removeItem(this.STORAGE_KEY + '_' + code);
+            // 持久化顺序
+            this._persistOrder();
+            console.log(`[TorrentKitty] 缓存已删除: ${code}`);
         }
     };
 
@@ -943,12 +959,44 @@
          */
         showErrorMessage(container, debugInfo) {
             container.innerHTML = '';
+
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
+
             const errorDiv = document.createElement('div');
             errorDiv.className = 'tk-info-hover';
             errorDiv.style.cssText = StyleUtils.infoBox(COLORS.error, state.settings.coverWidth);
             errorDiv.innerHTML = '⚠️ 封面加载失败<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
             errorDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
-            container.appendChild(errorDiv);
+
+            // 刷新按钮
+            const refreshBtn = document.createElement('button');
+            refreshBtn.className = 'tk-btn-hover';
+            refreshBtn.style.cssText = `
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                padding: 6px 12px;
+                background: ${COLORS.info.bg};
+                color: #fff;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                border: 1px solid ${COLORS.info.border};
+                cursor: pointer;
+                max-width: fit-content;
+                box-shadow: 0 2px 8px ${COLORS.info.shadow};
+                transition: all 0.3s ease;
+            `;
+            refreshBtn.innerHTML = '🔄 刷新重试';
+            refreshBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.refreshCover(container, debugInfo.code);
+            };
+
+            wrapper.appendChild(errorDiv);
+            wrapper.appendChild(refreshBtn);
+            container.appendChild(wrapper);
         },
 
         /**
@@ -956,12 +1004,67 @@
          */
         showNoResultMessage(container, debugInfo) {
             container.innerHTML = '';
+
+            const wrapper = document.createElement('div');
+            wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
+
             const infoDiv = document.createElement('div');
             infoDiv.className = 'tk-info-hover';
             infoDiv.style.cssText = StyleUtils.infoBox(COLORS.noResult, state.settings.coverWidth);
             infoDiv.innerHTML = 'ℹ️ 未找到封面信息<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
             infoDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
-            container.appendChild(infoDiv);
+
+            // 刷新按钮
+            const refreshBtn = document.createElement('button');
+            refreshBtn.className = 'tk-btn-hover';
+            refreshBtn.style.cssText = `
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                padding: 6px 12px;
+                background: ${COLORS.info.bg};
+                color: #fff;
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+                border: 1px solid ${COLORS.info.border};
+                cursor: pointer;
+                max-width: fit-content;
+                box-shadow: 0 2px 8px ${COLORS.info.shadow};
+                transition: all 0.3s ease;
+            `;
+            refreshBtn.innerHTML = '🔄 刷新重试';
+            refreshBtn.onclick = (e) => {
+                e.stopPropagation();
+                this.refreshCover(container, debugInfo.code);
+            };
+
+            wrapper.appendChild(infoDiv);
+            wrapper.appendChild(refreshBtn);
+            container.appendChild(wrapper);
+        },
+
+        /**
+         * 刷新封面 - 删除缓存并重新请求
+         */
+        refreshCover(container, code) {
+            // 显示加载中状态
+            container.innerHTML = `
+                <span style="display: inline-flex; align-items: center; gap: 8px;">
+                    <span style="display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(102, 126, 234, 0.3); border-top-color: #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></span>
+                    <span>重新加载中...</span>
+                </span>
+            `;
+
+            // 删除缓存
+            CacheManager.remove(code);
+
+            // 查找对应的行
+            const row = container.closest('tr');
+            if (row) {
+                // 重新加入请求队列
+                QueueManager.add({ code, row });
+            }
         },
 
         /**
