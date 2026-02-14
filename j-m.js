@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -25,7 +25,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 脚本版本号（元数据 @version 同步修改）
-        version: '4.4',
+        version: '4.5',
         // 是否开启调试日志
         debug: false,
         // 正常缓存过期时间 (7天)
@@ -91,6 +91,14 @@
         }
     };
 
+    // ==================== 图标资源 (SVG) ====================
+    const ICONS = {
+        PLAY: '<svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>',
+        SEARCH: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>',
+        LOADING: '<span class="spinner"></span>',
+        ERROR: '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+    };
+
     // ==================== 样式工具 ====================
     const StyleUtils = {
         /**
@@ -152,8 +160,16 @@
                     vertical-align: middle;
                     line-height: 1.2;
                     letter-spacing: 0.3px;
+                    line-height: 1.2;
+                    letter-spacing: 0.3px;
                     background-color: var(--btn-bg);
                     box-shadow: 0 4px 12px var(--btn-shadow);
+                    white-space: nowrap; /* 强制不换行 */
+                    flex-shrink: 0;      /* 防止被挤压 */
+                }
+
+                .bridge-btn svg {
+                    flex-shrink: 0;
                 }
 
                 .bridge-btn:hover {
@@ -217,9 +233,10 @@
 
             // 内容
             if (isLoading) {
-                btn.innerHTML = `<span class="spinner"></span><span>${text}</span>`;
+                btn.innerHTML = `${ICONS.LOADING}<span>${text}</span>`;
             } else {
-                btn.innerHTML = `${icon ? icon + ' ' : ''}${text}`;
+                // 使用 span 包裹文本，确保 gap 生效且图标与文本垂直居中
+                btn.innerHTML = `${icon ? icon : ''}<span>${text}</span>`;
             }
 
             return btn;
@@ -238,10 +255,10 @@
 
             // 统一处理 loading / 正常内容
             if (isLoading) {
-                btn.innerHTML = `<span class="spinner"></span><span>${text}</span>`;
+                btn.innerHTML = `${ICONS.LOADING}<span>${text}</span>`;
                 btn.classList.add('loading');
             } else {
-                btn.innerHTML = `${icon ? icon + ' ' : ''}${text}`;
+                btn.innerHTML = `${icon ? icon : ''}<span>${text}</span>`;
                 btn.classList.remove('loading');
             }
 
@@ -527,14 +544,14 @@
             const directUrl = `${CONFIG.missavBaseUrl}/${encodeURIComponent(code.toLowerCase())}`;
             const btnDirect = StyleUtils.createButton('MissAV', directUrl, COLORS.missav, {
                 tooltip: '直达 MissAV 播放页',
-                icon: '▶'
+                icon: ICONS.PLAY
             });
 
             // 按钮 2: MissAV 搜索
             const searchUrl = `${CONFIG.missavBaseUrl}/search/${encodeURIComponent(code)}`;
             const btnSearch = StyleUtils.createButton('搜索', searchUrl, COLORS.search, {
                 tooltip: '在 MissAV 搜索',
-                icon: '🔍'
+                icon: ICONS.SEARCH
             });
 
             container.appendChild(btnDirect);
@@ -591,8 +608,9 @@
                 if (result.success) {
                     // 成功获取直达链接
                     btnJavDB.href = result.url;
+                    btnJavDB.href = result.url;
                     StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
-                        icon: '▶',
+                        icon: ICONS.PLAY,
                         addSuccessAnimation: !result.fromCache
                     });
                     btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
@@ -601,7 +619,7 @@
                     // 未找到但有搜索链接
                     btnJavDB.href = result.fallbackUrl;
                     StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
-                        icon: '🔍'
+                        icon: ICONS.SEARCH
                     });
                     btnJavDB.title = '未找到直达链接，点击搜索';
                     btnJavDB.onclick = null;
@@ -610,14 +628,14 @@
                     manualRetryCount++;
                     if (manualRetryCount >= MAX_MANUAL_RETRIES) {
                         // 超过手动重试上限 → 禁用按钮
-                        StyleUtils.updateButton(btnJavDB, '失败', COLORS.error, { icon: '❌' });
+                        StyleUtils.updateButton(btnJavDB, '失败', COLORS.error, { icon: ICONS.ERROR });
                         btnJavDB.title = '多次重试失败，请稍后刷新页面';
                         btnJavDB.onclick = (e) => e.preventDefault();
                         btnJavDB.style.pointerEvents = 'none';
                         btnJavDB.style.opacity = '0.6';
                     } else {
                         StyleUtils.updateButton(btnJavDB, `重试 (${manualRetryCount}/${MAX_MANUAL_RETRIES})`, COLORS.error, {
-                            icon: '⚠️'
+                            icon: ICONS.ERROR
                         });
                         btnJavDB.title = result.error || '请求失败，点击重试';
                         // 点击手动重试
