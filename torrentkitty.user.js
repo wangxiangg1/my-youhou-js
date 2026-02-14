@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      2.9
-// @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、localStorage持久化缓存、支持东热番号、刷新重试功能
+// @version      3.0
+// @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、GM存储持久化缓存、支持东热番号、刷新重试功能
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -26,11 +26,45 @@
 // @match        *://torrentkitty.dev/*
 // @updateURL    https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
-// @grant        none
+// @grant        GM_xmlhttpRequest
+// @grant        GM_getValue
+// @grant        GM_setValue
+// @grant        GM_deleteValue
+// @connect      javdb.com
+// @connect      jdbstatic.com
 // ==/UserScript==
 
 (function () {
     'use strict';
+
+    // ==================== GM_xmlhttpRequest Promise 封装 ====================
+    /**
+     * 将 GM_xmlhttpRequest 封装为类 fetch 的 Promise 接口
+     * 使用 GM API 绕过浏览器同源策略 (CORS) 限制
+     */
+    function gmFetch(url) {
+        return new Promise((resolve, reject) => {
+            GM_xmlhttpRequest({
+                method: 'GET',
+                url: url,
+                headers: {
+                    'Accept': 'text/html,application/xhtml+xml',
+                    'Accept-Language': 'zh-CN,zh;q=0.9'
+                },
+                onload: (response) => resolve({
+                    ok: response.status >= 200 && response.status < 300,
+                    status: response.status,
+                    statusText: response.statusText,
+                    text: () => Promise.resolve(response.responseText)
+                }),
+                onerror: (error) => reject(new Error('网络请求失败')),
+                ontimeout: () => reject(new Error('请求超时'))
+            });
+        });
+    }
+
+    // ==================== 版本常量 ====================
+    const VERSION = '3.0';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -55,13 +89,14 @@
         cache: {
             maxSize: 80               // 最大缓存条数
         },
-        // 轮询间隔
-        pollInterval: 10000,
         // 正则表达式 - 支持多种番号格式
-        // 格式1: ABC-123 (带连字符)
-        // 格式2: ABC123 (不带连字符)
+        // 格式1: ABC-123 (带连字符，字母2-6位)
+        // 格式2: ABC123 (不带连字符，字母2-6位)
         // 格式3: n1234 (东热番号，单字母n + 4位数字)
-        codeRegex: /([a-zA-Z]{1,6}-?\d{3,5})/i,
+        // 使用词边界\b防止误匹配，排除常见非番号前缀 (GB/MB/KB/MP/AES/UTF/ISO/SHA/MD5)
+        codeRegex: /\b(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-?\d{3,5})\b|\b(n\d{4})\b/i,
+        // 错误缓存过期时间 (5分钟) - 网络错误等短期缓存，避免永久阻止重试
+        errorCacheExpiry: 5 * 60 * 1000,
         // 存储键名
         storageKey: 'torrentkitty_settings'
     };
@@ -290,8 +325,14 @@
 
             const style = document.createElement('style');
             style.id = 'tk-enhanced-styles';
+
+            // 字体异步加载（避免 @import 阻塞 CSS 解析）
+            const fontLink = document.createElement('link');
+            fontLink.rel = 'stylesheet';
+            fontLink.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
+            document.head.appendChild(fontLink);
+
             style.textContent = `
-                @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
                 
                 @keyframes fadeIn {
                     from { opacity: 0; }
@@ -411,6 +452,32 @@
                     transform: scale(1.2);
                     box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
                 }
+                
+                /* 状态信息包装器 */
+                .tk-status-wrapper {
+                    display: flex;
+                    flex-direction: column;
+                    gap: 8px;
+                }
+                
+                /* 刷新重试按钮 */
+                .tk-refresh-btn {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 6px 12px;
+                    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
+                    color: #fff;
+                    border-radius: 8px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
+                    border: 1px solid rgba(79, 172, 254, 0.3);
+                    cursor: pointer;
+                    max-width: fit-content;
+                    box-shadow: 0 2px 8px rgba(0, 242, 254, 0.4);
+                    transition: all 0.3s ease;
+                }
             `;
             document.head.appendChild(style);
         }
@@ -423,7 +490,8 @@
         requestQueue: [],
         isProcessing: false,
         settings: { ...CONFIG.defaults },
-        intervalId: null,
+        observer: null,          // MutationObserver 实例
+        loadHandler: null,       // load 事件处理函数引用
         // 速率限制追踪
         requestTimestamps: [],  // 记录最近的请求时间戳
         currentBackoff: 0,      // 当前退避时间
@@ -433,10 +501,11 @@
     // ==================== 设置管理 ====================
     const SettingsManager = {
         load() {
-            const saved = localStorage.getItem(CONFIG.storageKey);
+            const saved = GM_getValue(CONFIG.storageKey, null);
             if (saved) {
                 try {
-                    state.settings = { ...CONFIG.defaults, ...JSON.parse(saved) };
+                    const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
+                    state.settings = { ...CONFIG.defaults, ...parsed };
                 } catch (e) {
                     console.error('[TorrentKitty] 加载设置失败:', e);
                 }
@@ -444,7 +513,7 @@
         },
 
         save() {
-            localStorage.setItem(CONFIG.storageKey, JSON.stringify(state.settings));
+            GM_setValue(CONFIG.storageKey, state.settings);
         },
 
         reset() {
@@ -454,7 +523,7 @@
     };
 
     // ==================== 缓存管理器 ====================
-    // 实现 LRU 缓存，使用 localStorage 持久化存储
+    // 实现 LRU 缓存，使用 GM_getValue/GM_setValue 持久化存储
     // 限制最大条数为 CONFIG.cache.maxSize (默认80条)
     const CacheManager = {
         // 存储键名
@@ -464,14 +533,14 @@
         EXPIRY_TIME: 24 * 60 * 60 * 1000,
 
         /**
-         * 初始化 - 从 localStorage 加载缓存
+         * 初始化 - 从 GM 存储加载缓存
          */
         init() {
             try {
                 // 加载缓存顺序
-                const orderData = localStorage.getItem(this.ORDER_KEY);
+                const orderData = GM_getValue(this.ORDER_KEY, null);
                 if (orderData) {
-                    const parsed = JSON.parse(orderData);
+                    const parsed = typeof orderData === 'string' ? JSON.parse(orderData) : orderData;
                     // 过滤掉过期的
                     const now = Date.now();
                     state.cacheOrder = parsed.filter(item => {
@@ -479,27 +548,30 @@
                             return true;
                         }
                         // 过期的也从缓存中删除
-                        localStorage.removeItem(this.STORAGE_KEY + '_' + item.code);
+                        GM_deleteValue(this.STORAGE_KEY + '_' + item.code);
                         return false;
                     });
+                    // 构建 Map 索引以加速查找
+                    this._rebuildOrderMap();
                 } else {
                     state.cacheOrder = [];
                 }
 
                 // 加载缓存数据到内存
                 state.cacheOrder.forEach(item => {
-                    const cached = localStorage.getItem(this.STORAGE_KEY + '_' + item.code);
+                    const cached = GM_getValue(this.STORAGE_KEY + '_' + item.code, null);
                     if (cached) {
                         try {
-                            state.javdbCache[item.code] = JSON.parse(cached);
+                            const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
+                            state.javdbCache[item.code] = data;
                         } catch (e) {
                             // 解析失败则删除
-                            localStorage.removeItem(this.STORAGE_KEY + '_' + item.code);
+                            GM_deleteValue(this.STORAGE_KEY + '_' + item.code);
                         }
                     }
                 });
 
-                console.log(`[TorrentKitty] 从 localStorage 加载了 ${state.cacheOrder.length} 条缓存`);
+                console.log(`[TorrentKitty] 从 GM 存储加载了 ${state.cacheOrder.length} 条缓存`);
             } catch (e) {
                 console.error('[TorrentKitty] 加载缓存失败:', e);
                 state.cacheOrder = [];
@@ -512,19 +584,26 @@
         get(code) {
             // 先从内存获取
             if (state.javdbCache[code]) {
+                const entry = state.javdbCache[code];
+                // 检查是否为已过期的错误缓存
+                if (entry.isError && entry.errorExpiry && Date.now() > entry.errorExpiry) {
+                    console.log(`[TorrentKitty] 错误缓存已过期，允许重试: ${code}`);
+                    this.remove(code);
+                    return null;
+                }
                 this._updateOrder(code);
-                return state.javdbCache[code];
+                return entry;
             }
 
-            // 再从 localStorage 获取
+            // 再从 GM 存储获取
             try {
-                const cached = localStorage.getItem(this.STORAGE_KEY + '_' + code);
+                const cached = GM_getValue(this.STORAGE_KEY + '_' + code, null);
                 if (cached) {
-                    const data = JSON.parse(cached);
+                    const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
                     // 写入内存
                     state.javdbCache[code] = data;
                     this._updateOrder(code);
-                    console.log(`[TorrentKitty] 从 localStorage 恢复缓存: ${code}`);
+                    console.log(`[TorrentKitty] 从 GM 存储恢复缓存: ${code}`);
                     return data;
                 }
             } catch (e) {
@@ -547,19 +626,17 @@
             // 写入内存
             state.javdbCache[code] = data;
 
-            // 写入 localStorage
+            // 写入 GM 存储
             try {
-                localStorage.setItem(this.STORAGE_KEY + '_' + code, JSON.stringify(data));
+                GM_setValue(this.STORAGE_KEY + '_' + code, data);
             } catch (e) {
                 console.error('[TorrentKitty] 缓存写入失败:', e);
-                // 如果存储满了，清理一些旧的
-                if (e.name === 'QuotaExceededError') {
-                    this._clearOldest(10);
-                    try {
-                        localStorage.setItem(this.STORAGE_KEY + '_' + code, JSON.stringify(data));
-                    } catch (e2) {
-                        console.error('[TorrentKitty] 重试写入仍失败:', e2);
-                    }
+                // GM 存储一般不会满，但仍做防御性处理
+                this._clearOldest(10);
+                try {
+                    GM_setValue(this.STORAGE_KEY + '_' + code, data);
+                } catch (e2) {
+                    console.error('[TorrentKitty] 重试写入仍失败:', e2);
                 }
             }
 
@@ -577,18 +654,33 @@
          */
         _updateOrder(code) {
             const now = Date.now();
-            // 移除旧位置
-            state.cacheOrder = state.cacheOrder.filter(item => item.code !== code);
+            // O(1) 查找并移除旧位置
+            const oldIndex = state.cacheOrderMap?.get(code);
+            if (oldIndex !== undefined) {
+                state.cacheOrder.splice(oldIndex, 1);
+            }
             // 添加到末尾 (最近访问)
             state.cacheOrder.push({ code, timestamp: now });
+            // 重建 Map 索引
+            this._rebuildOrderMap();
         },
 
         /**
-         * 持久化顺序到 localStorage
+         * 重建缓存顺序索引 Map
+         */
+        _rebuildOrderMap() {
+            state.cacheOrderMap = new Map();
+            state.cacheOrder.forEach((item, index) => {
+                state.cacheOrderMap.set(item.code, index);
+            });
+        },
+
+        /**
+         * 持久化顺序到 GM 存储
          */
         _persistOrder() {
             try {
-                localStorage.setItem(this.ORDER_KEY, JSON.stringify(state.cacheOrder));
+                GM_setValue(this.ORDER_KEY, state.cacheOrder);
             } catch (e) {
                 console.error('[TorrentKitty] 保存缓存顺序失败:', e);
             }
@@ -612,8 +704,8 @@
                 if (oldest) {
                     // 从内存删除
                     delete state.javdbCache[oldest.code];
-                    // 从 localStorage 删除
-                    localStorage.removeItem(this.STORAGE_KEY + '_' + oldest.code);
+                    // 从 GM 存储删除
+                    GM_deleteValue(this.STORAGE_KEY + '_' + oldest.code);
                     console.log(`[TorrentKitty] 缓存淘汰: ${oldest.code}`);
                 }
             }
@@ -635,8 +727,8 @@
             delete state.javdbCache[code];
             // 从缓存顺序中删除
             state.cacheOrder = state.cacheOrder.filter(item => item.code !== code);
-            // 从 localStorage 删除
-            localStorage.removeItem(this.STORAGE_KEY + '_' + code);
+            // 从 GM 存储删除
+            GM_deleteValue(this.STORAGE_KEY + '_' + code);
             // 持久化顺序
             this._persistOrder();
             console.log(`[TorrentKitty] 缓存已删除: ${code}`);
@@ -771,7 +863,7 @@
                 const searchUrl = `https://javdb.com/search?q=${encodeURIComponent(code)}&f=all`;
                 debugInfo.fetchUrl = searchUrl;
 
-                const response = await fetch(searchUrl);
+                const response = await gmFetch(searchUrl);
                 debugInfo.fetchStatus = `HTTP ${response.status} ${response.statusText}`;
 
                 // 检测速率限制和封禁
@@ -813,12 +905,21 @@
             } catch (error) {
                 debugInfo.errorMessage = debugInfo.errorMessage || error.message || String(error);
                 console.error('[TorrentKitty] JavDB 请求错误:', error);
-                CacheManager.set(code, { url: null, coverId: null, debugInfo });
 
-                // 仅对速率限制相关错误重新抛出，触发退避机制
-                if (['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message)) {
+                const isRetryableError = ['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
+
+                if (isRetryableError) {
+                    // 速率限制/封禁/验证码 → 不缓存，直接触发退避重试
+                    UIUpdater.updateRow(row, code, debugInfo);
                     throw error;
                 }
+
+                // 其他网络错误 → 短期缓存(5分钟后过期可重试)
+                CacheManager.set(code, {
+                    url: null, coverId: null, debugInfo,
+                    isError: true,
+                    errorExpiry: Date.now() + CONFIG.errorCacheExpiry
+                });
             }
 
             UIUpdater.updateRow(row, code, debugInfo);
@@ -845,10 +946,10 @@
          * 解析搜索结果
          */
         parseSearchResult(html) {
-            const tempDiv = document.createElement('div');
-            tempDiv.innerHTML = html;
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
 
-            const firstResult = tempDiv.querySelector('.movie-list a.box');
+            const firstResult = doc.querySelector('.movie-list a.box');
             if (firstResult?.getAttribute('href')) {
                 const href = firstResult.getAttribute('href');
                 return {
@@ -914,7 +1015,11 @@
             if (coverId) {
                 this.showCoverImage(container, coverId, debugInfo);
             } else {
-                this.showNoResultMessage(container, debugInfo);
+                this.showStatusMessage(container, debugInfo, {
+                    icon: 'ℹ️',
+                    text: '未找到封面信息',
+                    color: COLORS.noResult
+                });
             }
         },
 
@@ -944,7 +1049,11 @@
                 debugInfo.imageLoadSuccess = false;
                 debugInfo.imageError = '图片 HTTP 请求失败（404 或网络错误）';
                 container.dataset.debugInfo = JSON.stringify(debugInfo);
-                this.showErrorMessage(container, debugInfo);
+                this.showStatusMessage(container, debugInfo, {
+                    icon: '⚠️',
+                    text: '封面加载失败',
+                    color: COLORS.error
+                });
             };
 
             container.innerHTML = '';
@@ -955,91 +1064,32 @@
         },
 
         /**
-         * 显示错误消息
+         * 显示状态消息（统一处理错误和无结果）
+         * @param {HTMLElement} container - 容器元素
+         * @param {Object} debugInfo - 调试信息
+         * @param {Object} options - { icon, text, color }
          */
-        showErrorMessage(container, debugInfo) {
+        showStatusMessage(container, debugInfo, { icon, text, color }) {
             container.innerHTML = '';
 
             const wrapper = document.createElement('div');
-            wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
+            wrapper.className = 'tk-status-wrapper';
 
-            const errorDiv = document.createElement('div');
-            errorDiv.className = 'tk-info-hover';
-            errorDiv.style.cssText = StyleUtils.infoBox(COLORS.error, state.settings.coverWidth);
-            errorDiv.innerHTML = '⚠️ 封面加载失败<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
-            errorDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
+            const msgDiv = document.createElement('div');
+            msgDiv.className = 'tk-info-hover';
+            msgDiv.style.cssText = StyleUtils.infoBox(color, state.settings.coverWidth);
+            msgDiv.innerHTML = `${icon} ${text}<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>`;
+            msgDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
 
-            // 刷新按钮
             const refreshBtn = document.createElement('button');
-            refreshBtn.className = 'tk-btn-hover';
-            refreshBtn.style.cssText = `
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                padding: 6px 12px;
-                background: ${COLORS.info.bg};
-                color: #fff;
-                border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
-                border: 1px solid ${COLORS.info.border};
-                cursor: pointer;
-                max-width: fit-content;
-                box-shadow: 0 2px 8px ${COLORS.info.shadow};
-                transition: all 0.3s ease;
-            `;
+            refreshBtn.className = 'tk-btn-hover tk-refresh-btn';
             refreshBtn.innerHTML = '🔄 刷新重试';
             refreshBtn.onclick = (e) => {
                 e.stopPropagation();
                 this.refreshCover(container, debugInfo.code);
             };
 
-            wrapper.appendChild(errorDiv);
-            wrapper.appendChild(refreshBtn);
-            container.appendChild(wrapper);
-        },
-
-        /**
-         * 显示无结果消息
-         */
-        showNoResultMessage(container, debugInfo) {
-            container.innerHTML = '';
-
-            const wrapper = document.createElement('div');
-            wrapper.style.cssText = 'display: flex; flex-direction: column; gap: 8px;';
-
-            const infoDiv = document.createElement('div');
-            infoDiv.className = 'tk-info-hover';
-            infoDiv.style.cssText = StyleUtils.infoBox(COLORS.noResult, state.settings.coverWidth);
-            infoDiv.innerHTML = 'ℹ️ 未找到封面信息<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>';
-            infoDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
-
-            // 刷新按钮
-            const refreshBtn = document.createElement('button');
-            refreshBtn.className = 'tk-btn-hover';
-            refreshBtn.style.cssText = `
-                display: inline-flex;
-                align-items: center;
-                justify-content: center;
-                padding: 6px 12px;
-                background: ${COLORS.info.bg};
-                color: #fff;
-                border-radius: 8px;
-                font-size: 12px;
-                font-weight: 600;
-                border: 1px solid ${COLORS.info.border};
-                cursor: pointer;
-                max-width: fit-content;
-                box-shadow: 0 2px 8px ${COLORS.info.shadow};
-                transition: all 0.3s ease;
-            `;
-            refreshBtn.innerHTML = '🔄 刷新重试';
-            refreshBtn.onclick = (e) => {
-                e.stopPropagation();
-                this.refreshCover(container, debugInfo.code);
-            };
-
-            wrapper.appendChild(infoDiv);
+            wrapper.appendChild(msgDiv);
             wrapper.appendChild(refreshBtn);
             container.appendChild(wrapper);
         },
@@ -1415,13 +1465,14 @@
          * 美化原站按钮
          */
         style() {
-            const buttons = document.querySelectorAll('a, input[type="button"], input[type="submit"]');
+            const buttons = document.querySelectorAll('a:not(.tk-styled), input[type="button"]:not(.tk-styled), input[type="submit"]:not(.tk-styled)');
 
             buttons.forEach(btn => {
                 const text = btn.innerText || btn.value || '';
 
                 for (const type of this.buttonTypes) {
                     if (type.keywords.some(keyword => text.includes(keyword))) {
+                        btn.classList.add('tk-styled');
                         btn.style.cssText = StyleUtils.buttonBase(type.color);
                         break;
                     }
@@ -1439,20 +1490,25 @@
             const rows = document.querySelectorAll('tr');
 
             rows.forEach(row => {
-                // 跳过已处理的行
-                if (row.querySelector('.missav-btn, .javdb-btn')) return;
+                try {
+                    // 跳过已处理的行
+                    if (row.querySelector('.missav-btn, .javdb-btn')) return;
 
-                const rowText = row.innerText;
-                const match = rowText.match(CONFIG.codeRegex);
+                    const rowText = row.innerText;
+                    const match = rowText.match(CONFIG.codeRegex);
 
-                if (match) {
-                    // 格式化番号：将 CLA314 转换为 CLA-314
-                    let code = match[1].toUpperCase();
-                    if (!code.includes('-')) {
-                        // 找到字母和数字的分界点，插入连字符
-                        code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
+                    if (match) {
+                        // 提取匹配的番号 (match[1]: 标准番号, match[2]: 东热番号)
+                        let code = (match[1] || match[2]).toUpperCase();
+                        // 格式化番号：将 CLA314 转换为 CLA-314（东热番号 N1234 不插入连字符）
+                        if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
+                            // 找到字母和数字的分界点，插入连字符
+                            code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
+                        }
+                        this.enhanceRow(row, code);
                     }
-                    this.enhanceRow(row, code);
+                } catch (e) {
+                    console.error('[TorrentKitty] 处理行时出错:', e, row);
                 }
             });
 
@@ -1548,40 +1604,74 @@
             // 加载设置
             SettingsManager.load();
 
-            // 初始化缓存 (从 localStorage 加载)
+            // 初始化缓存 (从 GM 存储加载)
             CacheManager.init();
 
             // 输出版本信息
             console.log(
-                '%c✨ TorrentKitty Enhanced v2.8 %c已加载',
+                `%c✨ TorrentKitty Enhanced v${VERSION} %c已加载`,
                 'background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: #38ef7d; color: #1e293b; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
 
-            // 页面加载完成后执行
-            window.addEventListener('load', () => {
+            // 页面加载完成后执行（保存引用以便 cleanup 时移除）
+            state.loadHandler = () => {
                 this.processRows();
                 ButtonFactory.createSettingsButton();
+            };
+            window.addEventListener('load', state.loadHandler);
+
+            // 使用 MutationObserver 监听 DOM 变化（替代 setInterval 轮询）
+            let debounceTimer = null;
+            state.observer = new MutationObserver((mutations) => {
+                // 过滤掉脚本自身的 DOM 修改，避免死循环
+                const hasRelevantChanges = mutations.some(m =>
+                    !m.target.closest?.('.javdb-cover-container') &&
+                    !m.target.closest?.('.javdb-btn') &&
+                    !m.target.closest?.('.missav-btn') &&
+                    !m.target.closest?.('.tk-settings-fab') &&
+                    !m.target.classList?.contains('tk-styled')
+                );
+                if (hasRelevantChanges) {
+                    // 防抖：300ms 内多次 DOM 变化只触发一次处理
+                    clearTimeout(debounceTimer);
+                    debounceTimer = setTimeout(() => this.processRows(), 300);
+                }
             });
 
-            // 定时轮询（处理动态加载的内容）
-            state.intervalId = setInterval(() => {
-                this.processRows();
-            }, CONFIG.pollInterval);
+            // 等待 body 存在后开始观察
+            const startObserving = () => {
+                if (document.body) {
+                    state.observer.observe(document.body, {
+                        childList: true,
+                        subtree: true
+                    });
+                } else {
+                    setTimeout(startObserving, 100);
+                }
+            };
+            startObserving();
         },
 
         /**
          * 清理（可选，用于脚本卸载）
          */
         cleanup() {
-            if (state.intervalId) {
-                clearInterval(state.intervalId);
-                state.intervalId = null;
+            if (state.observer) {
+                state.observer.disconnect();
+                state.observer = null;
+            }
+            if (state.loadHandler) {
+                window.removeEventListener('load', state.loadHandler);
+                state.loadHandler = null;
             }
         }
     };
 
     // ==================== 启动 ====================
     App.init();
+
+    // 页面卸载时自动清理
+    window.addEventListener('beforeunload', () => App.cleanup());
 
 })();
