@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @description  在 JavDB 和 MissAV 之间双向跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -9,8 +9,8 @@
 // @match        https://missav.com/*
 // @match        https://missav.ai/*
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=javdb.com
-// @updateURL    https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/j-m.js
-// @downloadURL  https://github.com/wangxiangg1/my-youhou-js/raw/refs/heads/main/j-m.js
+// @updateURL    https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/j-m.js
+// @downloadURL  https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/j-m.js
 // @grant        GM_xmlhttpRequest      // 跨域请求 JavDB
 // @grant        GM_setValue             // 缓存写入、域名偏好记录
 // @grant        GM_getValue             // 缓存读取
@@ -25,7 +25,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 脚本版本号（元数据 @version 同步修改）
-        version: '4.5',
+        version: '4.6',
         // 是否开启调试日志
         debug: false,
         // 正常缓存过期时间 (7天)
