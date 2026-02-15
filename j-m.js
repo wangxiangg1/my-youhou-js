@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      6.0
+// @version      6.0.1
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -27,7 +27,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 版本号（与 @version 保持一致）
-        version: '6.0',
+        version: '6.0.1',
         // 正常缓存过期时间 (7天)
         cacheExpiry: 7 * 24 * 60 * 60 * 1000,
         // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
@@ -220,6 +220,7 @@
             const btn = document.createElement('a');
             btn.href = url;
             btn.target = '_blank';
+            btn.rel = 'noopener noreferrer';
             btn.className = `bridge-btn ${isLoading ? 'loading' : ''}`;
 
             if (tooltip) {
