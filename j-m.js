@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      5.2
+// @version      6.0
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -18,6 +18,7 @@
 // @grant        GM_deleteValue
 // @connect      javdb.com
 // @connect      jable.tv
+// @run-at       document-idle
 // ==/UserScript==
 
 (function () {
@@ -25,6 +26,8 @@
 
     // ==================== 配置常量 ====================
     const CONFIG = {
+        // 版本号（与 @version 保持一致）
+        version: '6.0',
         // 正常缓存过期时间 (7天)
         cacheExpiry: 7 * 24 * 60 * 60 * 1000,
         // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
@@ -103,8 +106,6 @@
             const style = document.createElement('style');
             style.id = 'bridge-styles';
             style.textContent = `
-                @import url('https://fonts.cdnfonts.com/css/harmonyos-sans');
-                
                 @keyframes bridge-spin {
                     to { transform: rotate(360deg); }
                 }
@@ -194,6 +195,23 @@
         },
 
         /**
+         * 安全设置按钮内容（避免 innerHTML XSS 风险）
+         */
+        _setButtonContent(btn, text, icon, isLoading) {
+            btn.textContent = '';
+            if (isLoading) {
+                const spinner = document.createElement('span');
+                spinner.className = 'spinner';
+                const textSpan = document.createElement('span');
+                textSpan.textContent = text;
+                btn.appendChild(spinner);
+                btn.appendChild(textSpan);
+            } else {
+                btn.textContent = (icon ? icon + ' ' : '') + text;
+            }
+        },
+
+        /**
          * 创建按钮
          */
         createButton(text, url, colorTheme, options = {}) {
@@ -223,12 +241,8 @@
             // 保存颜色主题供后续更新使用
             btn._colorTheme = colorTheme;
 
-            // 内容
-            if (isLoading) {
-                btn.innerHTML = `<span class="spinner"></span><span>${text}</span>`;
-            } else {
-                btn.innerHTML = `${icon ? icon + ' ' : ''}${text}`;
-            }
+            // 内容（使用安全 DOM API）
+            this._setButtonContent(btn, text, icon, isLoading);
 
             return btn;
         },
@@ -237,12 +251,18 @@
          * 更新按钮状态
          */
         updateButton(btn, text, colorTheme, options = {}) {
-            const { icon = '', addSuccessAnimation = false } = options;
+            const { icon = '', addSuccessAnimation = false, isLoading = false } = options;
 
             btn.style.backgroundColor = colorTheme.bg;
             btn.style.boxShadow = `0 4px 12px ${colorTheme.shadow}`;
-            btn.innerHTML = `${icon ? icon + ' ' : ''}${text}`;
-            btn.classList.remove('loading');
+
+            if (isLoading) {
+                this._setButtonContent(btn, text, '', true);
+                btn.classList.add('loading');
+            } else {
+                this._setButtonContent(btn, text, icon, false);
+                btn.classList.remove('loading');
+            }
 
             // 更新 Hover 效果
             btn.onmouseenter = () => {
@@ -427,13 +447,24 @@
                         const firstResult = doc.querySelector('.movie-list a.box');
 
                         if (firstResult) {
-                            const href = firstResult.getAttribute('href');
-                            const realUrl = `${CONFIG.javdbBaseUrl}${href}`;
+                            // 校验搜索结果的番号是否与查询番号精确匹配
+                            const resultTitle = firstResult.querySelector('.video-title strong, strong');
+                            const resultCode = resultTitle ? resultTitle.textContent.trim().toUpperCase() : '';
 
-                            // 写入正常缓存
-                            CacheManager.set(code, realUrl);
+                            if (resultCode === code.toUpperCase()) {
+                                const href = firstResult.getAttribute('href');
+                                const realUrl = `${CONFIG.javdbBaseUrl}${href}`;
 
-                            callback({ success: true, url: realUrl });
+                                // 写入正常缓存
+                                CacheManager.set(code, realUrl);
+
+                                callback({ success: true, url: realUrl });
+                            } else {
+                                // 搜索结果番号不匹配 -> 当作未找到处理
+                                console.log(`[Bridge] 搜索结果番号不匹配: 期望 ${code}, 实际 ${resultCode}`);
+                                CacheManager.setNotFound(code);
+                                callback({ success: false, fallbackUrl: searchUrl });
+                            }
                         } else {
                             // 搜索成功但无结果 -> 写入负缓存
                             CacheManager.setNotFound(code);
@@ -457,6 +488,56 @@
 
     // ==================== 页面处理器 ====================
     const PageHandler = {
+        /**
+         * 创建 JavDB 查询结果的统一回调处理函数
+         * @param {HTMLElement} btnJavDB - JavDB 按钮元素
+         * @param {string} code - 番号
+         * @returns {function} 回调函数
+         */
+        _createFetchResultHandler(btnJavDB, code) {
+            let retryCount = 0;
+            const MAX_RETRIES = 3;
+            const handleFetchResult = (result) => {
+                if (result.success) {
+                    btnJavDB.href = result.url;
+                    StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
+                        icon: '▶',
+                        addSuccessAnimation: !result.fromCache
+                    });
+                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
+                    btnJavDB.onclick = null;
+                } else if (result.fallbackUrl) {
+                    btnJavDB.href = result.fallbackUrl;
+                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
+                        icon: '🔍'
+                    });
+                    btnJavDB.title = '未找到直达链接，点击搜索';
+                    btnJavDB.onclick = null;
+                } else if (retryCount >= MAX_RETRIES) {
+                    // 超过最大重试次数，显示终态失败
+                    const searchUrl = `${CONFIG.javdbBaseUrl}/search?q=${code}&f=all`;
+                    btnJavDB.href = searchUrl;
+                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.error, {
+                        icon: '🔍'
+                    });
+                    btnJavDB.title = `重试 ${MAX_RETRIES} 次后仍失败，点击手动搜索`;
+                    btnJavDB.onclick = null;
+                } else {
+                    retryCount++;
+                    StyleUtils.updateButton(btnJavDB, `重试 (${retryCount}/${MAX_RETRIES})`, COLORS.error, {
+                        icon: '⚠️'
+                    });
+                    btnJavDB.title = result.error || '请求失败';
+                    btnJavDB.onclick = (e) => {
+                        e.preventDefault();
+                        StyleUtils.updateButton(btnJavDB, '重试中...', COLORS.loading, { isLoading: true });
+                        JavDBService.fetchRealUrl(code, handleFetchResult);
+                    };
+                }
+            };
+            return handleFetchResult;
+        },
+
         /**
          * 处理 JavDB 页面
          */
@@ -534,44 +615,8 @@
             container.appendChild(btnJavDB);
             titleElement.appendChild(container);
 
-            // 定义回调函数（用于重试时递归调用）
-            const handleFetchResult = (result) => {
-                if (result.success) {
-                    // 成功获取直达链接
-                    btnJavDB.href = result.url;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
-                        icon: '▶',
-                        addSuccessAnimation: !result.fromCache
-                    });
-                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
-                    btnJavDB.onclick = null; // 清除重试事件
-                } else if (result.fallbackUrl) {
-                    // 未找到但有搜索链接
-                    btnJavDB.href = result.fallbackUrl;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
-                        icon: '🔍'
-                    });
-                    btnJavDB.title = '未找到直达链接，点击搜索';
-                    btnJavDB.onclick = null; // 清除重试事件
-                } else {
-                    // 请求失败
-                    StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
-                        icon: '⚠️'
-                    });
-                    btnJavDB.title = result.error || '请求失败';
-                    // 点击重试
-                    btnJavDB.onclick = (e) => {
-                        e.preventDefault();
-                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
-                        btnJavDB.classList.add('loading');
-                        btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        // 使用命名函数进行递归重试
-                        JavDBService.fetchRealUrl(code, handleFetchResult);
-                    };
-                }
-            };
-
             // 发起请求获取真实链接
+            const handleFetchResult = this._createFetchResultHandler(btnJavDB, code);
             JavDBService.fetchRealUrl(code, handleFetchResult);
 
             console.log(`[Bridge] MissAV 页面增强完成: ${code}`);
@@ -677,36 +722,8 @@
             // 插入到目标元素后面
             targetElement.insertAdjacentElement('afterend', container);
 
-            // 定义回调函数
-            const handleFetchResult = (result) => {
-                if (result.success) {
-                    btnJavDB.href = result.url;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
-                        icon: '▶',
-                        addSuccessAnimation: !result.fromCache
-                    });
-                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
-                } else if (result.fallbackUrl) {
-                    btnJavDB.href = result.fallbackUrl;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
-                        icon: '🔍'
-                    });
-                    btnJavDB.title = '未找到直达链接，点击搜索';
-                } else {
-                    StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
-                        icon: '⚠️'
-                    });
-                    btnJavDB.title = result.error || '请求失败';
-                    btnJavDB.onclick = (e) => {
-                        e.preventDefault();
-                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
-                        btnJavDB.classList.add('loading');
-                        btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        JavDBService.fetchRealUrl(code, handleFetchResult);
-                    };
-                }
-            };
-
+            // 发起请求获取真实链接
+            const handleFetchResult = this._createFetchResultHandler(btnJavDB, code);
             JavDBService.fetchRealUrl(code, handleFetchResult);
             console.log(`[Bridge] Jable 页面增强完成 (元素后插入模式): ${code}`);
         },
@@ -749,36 +766,8 @@
             container.appendChild(btnJavDB);
             document.body.appendChild(container);
 
-            // 定义回调函数
-            const handleFetchResult = (result) => {
-                if (result.success) {
-                    btnJavDB.href = result.url;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
-                        icon: '▶',
-                        addSuccessAnimation: !result.fromCache
-                    });
-                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
-                } else if (result.fallbackUrl) {
-                    btnJavDB.href = result.fallbackUrl;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
-                        icon: '🔍'
-                    });
-                    btnJavDB.title = '未找到直达链接，点击搜索';
-                } else {
-                    StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
-                        icon: '⚠️'
-                    });
-                    btnJavDB.title = result.error || '请求失败';
-                    btnJavDB.onclick = (e) => {
-                        e.preventDefault();
-                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
-                        btnJavDB.classList.add('loading');
-                        btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        JavDBService.fetchRealUrl(code, handleFetchResult);
-                    };
-                }
-            };
-
+            // 发起请求获取真实链接
+            const handleFetchResult = this._createFetchResultHandler(btnJavDB, code);
             JavDBService.fetchRealUrl(code, handleFetchResult);
             console.log(`[Bridge] Jable 页面增强完成 (浮动模式): ${code}`);
         },
@@ -815,39 +804,8 @@
             container.appendChild(btnJavDB);
             titleElement.appendChild(container);
 
-            // 定义回调函数
-            const handleFetchResult = (result) => {
-                if (result.success) {
-                    btnJavDB.href = result.url;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 直达', COLORS.javdb, {
-                        icon: '▶',
-                        addSuccessAnimation: !result.fromCache
-                    });
-                    btnJavDB.title = result.fromCache ? '从缓存加载' : '已找到详情页';
-                    btnJavDB.onclick = null;
-                } else if (result.fallbackUrl) {
-                    btnJavDB.href = result.fallbackUrl;
-                    StyleUtils.updateButton(btnJavDB, 'JavDB 搜索', COLORS.search, {
-                        icon: '🔍'
-                    });
-                    btnJavDB.title = '未找到直达链接，点击搜索';
-                    btnJavDB.onclick = null;
-                } else {
-                    StyleUtils.updateButton(btnJavDB, '重试', COLORS.error, {
-                        icon: '⚠️'
-                    });
-                    btnJavDB.title = result.error || '请求失败';
-                    btnJavDB.onclick = (e) => {
-                        e.preventDefault();
-                        StyleUtils.updateButton(btnJavDB, 'JavDB', COLORS.loading, { isLoading: true });
-                        btnJavDB.classList.add('loading');
-                        btnJavDB.innerHTML = `<span class="spinner"></span><span>重试中...</span>`;
-                        JavDBService.fetchRealUrl(code, handleFetchResult);
-                    };
-                }
-            };
-
             // 发起请求获取真实链接
+            const handleFetchResult = this._createFetchResultHandler(btnJavDB, code);
             JavDBService.fetchRealUrl(code, handleFetchResult);
 
             console.log(`[Bridge] Jable 页面增强完成: ${code}`);
@@ -862,7 +820,7 @@
 
             // 输出版本信息
             console.log(
-                '%c🔗 JavDB & MissAV & Jable Bridge v5.0 %c已加载',
+                `%c🔗 JavDB & MissAV & Jable Bridge v${CONFIG.version} %c已加载`,
                 'background: linear-gradient(135deg, #f39c12, #e67e22); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
                 'background: linear-gradient(135deg, #9b59b6, #8e44ad); color: white; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
             );
@@ -872,7 +830,7 @@
 
             if (currentUrl.includes('javdb.com')) {
                 PageHandler.handleJavDB();
-            } else if (currentUrl.includes('missav')) {
+            } else if (window.location.hostname.includes('missav')) {
                 // 记录当前 MissAV 域名偏好
                 GM_setValue('missav_origin', window.location.origin);
                 PageHandler.handleMissAV();
