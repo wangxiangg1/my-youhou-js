@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      5.1
+// @version      5.2
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -338,9 +338,10 @@
 
             if (!rawCode) return null;
 
-            // 使用正则精确提取番号部分，排除后面的后缀（如 -chinese-subtitle）
-            // 番号格式：字母+连字符+数字（如 SNOS-059）或 单字母+数字（如 n1234 东热番号）
-            const codeMatch = rawCode.match(/^([a-zA-Z]+-\d+|[a-zA-Z]\d+|[a-zA-Z]+\d+)/i);
+            // 精确提取番号部分，排除后面的纯字母后缀（如 -chinese-subtitle, -uncensored）
+            // 支持格式：SNOS-059, FC2-PPV-1234567, n1234, ABC123
+            // 规则：匹配到最后一个数字为止，之后的 -纯字母 后缀被排除
+            const codeMatch = rawCode.match(/^(.*\d)(?:-[a-zA-Z].*)?$/i);
             if (codeMatch) {
                 return codeMatch[1].toUpperCase();
             }
@@ -377,9 +378,10 @@
             const match = path.match(/\/videos\/([^\/]+)/);
             if (match && match[1]) {
                 const rawCode = match[1];
-                // 使用正则精确提取番号部分，排除后面的后缀（如 -chinese-subtitle）
-                // 番号格式：字母+连字符+数字（如 SNOS-059）或 单字母+数字（如 n1234 东热番号）
-                const codeMatch = rawCode.match(/^([a-zA-Z]+-\d+|[a-zA-Z]\d+|[a-zA-Z]+\d+)/i);
+                // 精确提取番号部分，排除后面的纯字母后缀（如 -chinese-subtitle, -uncensored）
+                // 支持格式：SNOS-059, FC2-PPV-1234567, n1234, ABC123
+                // 规则：匹配到最后一个数字为止，之后的 -纯字母 后缀被排除
+                const codeMatch = rawCode.match(/^(.*\d)(?:-[a-zA-Z].*)?$/i);
                 if (codeMatch) {
                     return codeMatch[1].toUpperCase();
                 }
