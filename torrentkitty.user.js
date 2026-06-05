@@ -1077,13 +1077,13 @@
             if (fetchStatus === 'ERROR') {
                 this.showStatusMessage(coverContainer, debugInfo, {
                     icon: '❌',
-                    text: '[ERROR] NETWORK_FAIL',
+                    text: '[请求失败]',
                     color: { border: '#ef4444', text: '#ef4444' }
                 });
             } else if (!foundResult) {
                 this.showStatusMessage(coverContainer, debugInfo, {
                     icon: '🚫',
-                    text: '[INFO] NO_RECORD_FOUND',
+                    text: '[未收录]',
                     color: { border: '#f59e0b', text: '#fcd34d' }
                 });
             } else {
@@ -1099,14 +1099,14 @@
 
             if (url) {
                 btn.href = url;
-                btn.innerText = '🔗 DB_LINK';
+                btn.innerText = '🔗 JavDB';
                 btn.style.background = 'rgba(6, 182, 212, 0.15)';
                 btn.style.border = '1px solid rgba(6, 182, 212, 0.5)';
                 btn.style.color = '#06b6d4';
                 btn.style.fontFamily = "'JetBrains Mono', sans-serif";
                 btn.style.boxShadow = `0 4px 15px rgba(6, 182, 212, 0.2)`;
             } else {
-                btn.innerText = 'Ø NO_LINK';
+                btn.innerText = 'Ø 无详情';
                 btn.style.background = 'rgba(15, 23, 42, 0.8)';
                 btn.style.border = '1px solid rgba(148, 163, 184, 0.3)';
                 btn.style.color = '#94a3b8';
@@ -1128,7 +1128,7 @@
             } else {
                 this.showStatusMessage(container, debugInfo, {
                     icon: '⚠️',
-                    text: '[ERROR] NOT_FOUND',
+                    text: '[无记录]',
                     color: { border: '#eab308', text: '#eab308' }
                 });
             }
@@ -1191,7 +1191,7 @@
                 container.dataset.debugInfo = JSON.stringify(debugInfo);
                 this.showStatusMessage(container, debugInfo, {
                     icon: '🚫',
-                    text: '[ERROR] LOAD_FAILED',
+                    text: '[加载失败]',
                     color: { border: '#ef4444', text: '#ef4444' }
                 });
             };
@@ -1211,13 +1211,13 @@
                 text-transform: uppercase;
                 border-top: 1px solid rgba(255, 255, 255, 0.2);
             `;
-            fallbackMsg.innerText = '[WARN] PROXY_REQUIRED';
+            fallbackMsg.innerText = '[可能需代理]';
             
             // 绑定 onError 用于显示代理提醒 (这主要是处理本地被拦截但能触发onerror的情况)
             img.onerror = function() {
                 this.onerror=null; 
                 // base64 SVG placeholder (赛博红)
-                this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJyZ2JhKDIsIDYsIDIzLCAwLjkpIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNlZjQ0NDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5bSU1BR0VfRkFJTF08L3RleHQ+PC9zdmc+'; 
+                this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJyZ2JhKDIsIDYsIDIzLCAwLjkpIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNlZjQ0NDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5b5Zu+54mH5byC5bi4XTwvdGV4dD48L3N2Zz4='; 
                 this.nextElementSibling.style.display='block';
                 
                 debugInfo.imageLoadSuccess = false;
@@ -1276,13 +1276,13 @@
             msgDiv.innerHTML = `
                 <div style="font-size: 24px; margin-bottom: 8px; filter: drop-shadow(0 0 8px ${color.border});">${icon}</div>
                 <div style="font-weight: 700; letter-spacing: 1px; text-transform: uppercase;">${text}</div>
-                <small style="opacity: 0.6; margin-top: 8px; font-size: 10px; font-family: 'JetBrains Mono', monospace;">[CLICK_FOR_DIAGNOSTICS]</small>
+                <small style="opacity: 0.6; margin-top: 8px; font-size: 10px; font-family: 'JetBrains Mono', monospace;">[点击查看调试信息]</small>
             `;
             msgDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
 
             const refreshBtn = document.createElement('button');
             refreshBtn.className = 'tk-btn-hover tk-refresh-btn';
-            refreshBtn.innerHTML = 'RETRY_SYNC';
+            refreshBtn.innerHTML = '🔄 刷新重试';
             refreshBtn.style.marginTop = '10px';
             refreshBtn.onclick = (e) => {
                 e.stopPropagation();
@@ -1314,7 +1314,7 @@
                 ">
                     <span style="display: inline-flex; align-items: center; gap: 10px;">
                         <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(6, 182, 212, 0.2); border-top-color: #06b6d4; border-radius: 50%; animation: spin 1s linear infinite, neonPulse 2s infinite;"></span>
-                        <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">RE-SYNCING...</span>
+                        <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">重新同步中...</span>
                     </span>
                 </div>
             `;
@@ -1754,7 +1754,7 @@
             `;
             const header = document.createElement('div');
             header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; cursor: pointer; border-bottom: 1px solid rgba(236, 72, 153, 0.2); padding-bottom: 8px;';
-            header.innerHTML = `<span style="font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #ec4899; text-shadow: 0 0 5px rgba(236, 72, 153, 0.5);">🛡️ FILTER_RULES</span><span id="tk-exc-toggle" style="font-size: 12px; color: #ec4899;">▼</span>`;
+            header.innerHTML = `<span style="font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #ec4899; text-shadow: 0 0 5px rgba(236, 72, 153, 0.5);">🛡️ 排除关键字</span><span id="tk-exc-toggle" style="font-size: 12px; color: #ec4899;">▼</span>`;
             
             const body = document.createElement('div');
             body.id = 'tk-exc-body';
@@ -1764,7 +1764,7 @@
             
             const input = document.createElement('input');
             input.type = 'text';
-            input.placeholder = 'INPUT_KEYWORD...';
+            input.placeholder = '输入排除词...';
             input.className = 'tk-input-modern';
             input.style.cssText = `
                 flex: 1;
@@ -1780,7 +1780,7 @@
             `;
             
             const btn = document.createElement('button');
-            btn.innerText = 'ADD';
+            btn.innerText = '添加';
             btn.className = 'tk-btn-hover';
             btn.style.cssText = StyleUtils.buttonBase(COLORS.primary, { padding: '8px 12px', fontSize: '12px', margin: '0' });
             btn.style.fontFamily = "'JetBrains Mono', sans-serif";
@@ -1860,9 +1860,9 @@
     const OriginalButtonStyler = {
         // 按钮类型映射
         buttonTypes: [
-            { keywords: ['Detail', '详情'], color: COLORS.info, newText: 'DETAILS' },
-            { keywords: ['Open', '打开'], color: COLORS.success, newText: 'OPEN_LINK' },
-            { keywords: ['Download', '下载'], color: COLORS.danger, newText: 'DOWNLOAD_MAGNET' }
+            { keywords: ['Detail', '详情'], color: COLORS.info, newText: '详情' },
+            { keywords: ['Open', '打开'], color: COLORS.success, newText: '打开' },
+            { keywords: ['Download', '下载'], color: COLORS.danger, newText: '下载' }
         ],
 
         /**
@@ -2046,7 +2046,7 @@
 
             // 创建 MissAV 按钮
             const missavBtn = ButtonFactory.createLinkButton(
-                '▶ MISS_AV',
+                '▶ MissAV',
                 `https://missav.ws/cn/${code}`,
                 COLORS.pink,
                 'missav-btn'
@@ -2057,7 +2057,7 @@
 
             // 创建 JavDB 按钮
             const javdbBtn = ButtonFactory.createLinkButton(
-                '⏳ DATALINK_INIT...',
+                '⏳ 加载中...',
                 '#',
                 COLORS.neutral,
                 'javdb-btn'
@@ -2102,7 +2102,7 @@
             coverContainer.innerHTML = `
                 <span style="display: inline-flex; align-items: center; gap: 10px;">
                     <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(6, 182, 212, 0.2); border-top-color: #06b6d4; border-radius: 50%; animation: spin 1s linear infinite, neonPulse 2s infinite;"></span>
-                    <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">INITIALIZING DATALINK...</span>
+                    <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">数据链接初始化...</span>
                 </span>
             `;
             parent.appendChild(coverContainer);
@@ -2181,7 +2181,7 @@
             
             if (showContinueBtn) {
                 const btn = document.createElement('button');
-                btn.innerText = '>> PROCEED_NEXT';
+                btn.innerText = '>> 继续查询';
                 btn.style.cssText = `
                     margin-left: 15px;
                     padding: 6px 14px;
@@ -2208,7 +2208,7 @@
                 };
                 btn.onclick = () => {
                     state.targetValidCount += 8;
-                    this.showStatusBanner('INITIATING_SEARCH...', false);
+                    this.showStatusBanner('准备继续查询...', false);
                     this.checkPaginationAndDispatch();
                 };
                 banner.appendChild(btn);
@@ -2331,7 +2331,7 @@
                         const badge = document.createElement('span');
                         badge.className = 'tk-page-marker'; // 添加特定的类名以便 Observer 过滤 (修复 #7)
                         badge.style.cssText = 'margin-left: 10px; padding: 2px 8px; background: rgba(236, 72, 153, 0.15); color: #ec4899; border-radius: 4px; font-size: 11px; font-weight: bold; border: 1px solid rgba(236, 72, 153, 0.4); text-shadow: 0 0 5px rgba(236, 72, 153, 0.5); font-family: "JetBrains Mono", sans-serif;';
-                        badge.innerText = `[PAGE_${pageNum}]`;
+                        badge.innerText = `[原第 ${pageNum} 页]`;
                         nameCell.appendChild(badge);
                     }
                 }
