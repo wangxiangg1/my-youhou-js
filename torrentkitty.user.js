@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.2
+// @version      4.3
 // @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -71,7 +71,7 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.2';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.3';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -1084,8 +1084,9 @@
             if (state.isProcessing || state.requestQueue.length === 0) {
                 if (!state.isProcessing && state.requestQueue.length === 0 && typeof App !== 'undefined' && App.showStatusBanner) {
                     const banner = document.getElementById('tk-status-banner');
-                    if (banner && banner.innerText.includes('排队加载封面')) {
+                    if (banner && (banner.innerText.includes('正在异步') || banner.innerText.includes('排队加载'))) {
                         App.showStatusBanner('封面数据全部加载完成！', true);
+                        App.hideStatusBanner(3000);
                     }
                 }
                 return;
@@ -2165,6 +2166,11 @@
                     this.enhanceRow(row, code);
                 }
             });
+
+            if (state.requestQueue.length === 0) {
+                this.showStatusBanner('封面数据已从本地缓存全部加载完成！', true);
+                this.hideStatusBanner(3000);
+            }
         },
 
         loadNextPage(pageNum) {
