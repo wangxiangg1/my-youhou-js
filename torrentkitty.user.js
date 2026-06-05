@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      3.0
-// @description  TorrentKitty 增强：现代化UI、封面展示、智能速率限制、GM存储持久化缓存、支持东热番号、刷新重试功能
+// @version      3.7
+// @description  TorrentKitty 增强：增加悬浮框排除关键字过滤，无结果不卡死、排队优化
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -32,6 +32,16 @@
 // @grant        GM_deleteValue
 // @connect      javdb.com
 // @connect      jdbstatic.com
+// @connect      torrentkitty.tv
+// @connect      torrentkitty.com
+// @connect      torrentkitty.io
+// @connect      torrentkitty.live
+// @connect      torkitty.net
+// @connect      torrentkitty.ink
+// @connect      torrentkitty.asia
+// @connect      torrentkitty.cam
+// @connect      torrentkitty.one
+// @connect      torrentkitty.dev
 // ==/UserScript==
 
 (function () {
@@ -47,6 +57,7 @@
             GM_xmlhttpRequest({
                 method: 'GET',
                 url: url,
+                timeout: 15000, // 强制15秒超时，防止队列假死
                 headers: {
                     'Accept': 'text/html,application/xhtml+xml',
                     'Accept-Language': 'zh-CN,zh;q=0.9'
@@ -64,7 +75,7 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = '3.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '3.7';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -97,92 +108,101 @@
         codeRegex: /\b(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-?\d{3,5})\b|\b(n\d{4})\b/i,
         // 错误缓存过期时间 (5分钟) - 网络错误等短期缓存，避免永久阻止重试
         errorCacheExpiry: 5 * 60 * 1000,
+        // 自动拉取最大页数限制，防止死循环
+        maxPagesToFetch: 10,
         // 存储键名
         storageKey: 'torrentkitty_settings'
     };
 
-    // ==================== 现代化颜色主题 ====================
+    // ==================== 现代化颜色主题 (Neon Glassmorphism) ====================
     const COLORS = {
-        // 主题色 - 使用高级渐变色系
+        // 主题色 - 深空紫与赛博青渐变
         primary: {
-            bg: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)',
-            bgSolid: '#667eea',
-            border: 'rgba(102, 126, 234, 0.3)',
-            hover: 'linear-gradient(135deg, #764ba2 0%, #667eea 100%)',
-            shadow: 'rgba(102, 126, 234, 0.4)'
+            bg: 'linear-gradient(135deg, #6b21a8 0%, #06b6d4 100%)',
+            bgSolid: '#06b6d4',
+            border: 'rgba(6, 182, 212, 0.4)',
+            hover: 'linear-gradient(135deg, #06b6d4 0%, #6b21a8 100%)',
+            shadow: 'rgba(6, 182, 212, 0.5)'
         },
+        // 成功 - 荧光绿
         success: {
-            bg: 'linear-gradient(135deg, #11998e 0%, #38ef7d 100%)',
-            bgSolid: '#11998e',
-            border: 'rgba(17, 153, 142, 0.3)',
-            hover: 'linear-gradient(135deg, #38ef7d 0%, #11998e 100%)',
-            shadow: 'rgba(56, 239, 125, 0.4)'
+            bg: 'linear-gradient(135deg, #047857 0%, #10b981 100%)',
+            bgSolid: '#10b981',
+            border: 'rgba(16, 185, 129, 0.4)',
+            hover: 'linear-gradient(135deg, #10b981 0%, #047857 100%)',
+            shadow: 'rgba(16, 185, 129, 0.5)'
         },
+        // 警告 - 赛博黄
         warning: {
-            bg: 'linear-gradient(135deg, #f093fb 0%, #f5576c 100%)',
-            bgSolid: '#f093fb',
-            border: 'rgba(240, 147, 251, 0.3)',
-            hover: 'linear-gradient(135deg, #f5576c 0%, #f093fb 100%)',
-            shadow: 'rgba(245, 87, 108, 0.4)'
+            bg: 'linear-gradient(135deg, #b45309 0%, #f59e0b 100%)',
+            bgSolid: '#f59e0b',
+            border: 'rgba(245, 158, 11, 0.4)',
+            hover: 'linear-gradient(135deg, #f59e0b 0%, #b45309 100%)',
+            shadow: 'rgba(245, 158, 11, 0.5)'
         },
+        // 危险 - 霓虹红
         danger: {
-            bg: 'linear-gradient(135deg, #ff416c 0%, #ff4b2b 100%)',
-            bgSolid: '#ff416c',
-            border: 'rgba(255, 65, 108, 0.3)',
-            hover: 'linear-gradient(135deg, #ff4b2b 0%, #ff416c 100%)',
-            shadow: 'rgba(255, 75, 43, 0.4)'
+            bg: 'linear-gradient(135deg, #9f1239 0%, #f43f5e 100%)',
+            bgSolid: '#f43f5e',
+            border: 'rgba(244, 63, 94, 0.4)',
+            hover: 'linear-gradient(135deg, #f43f5e 0%, #9f1239 100%)',
+            shadow: 'rgba(244, 63, 94, 0.5)'
         },
+        // 信息 - 电光蓝
         info: {
-            bg: 'linear-gradient(135deg, #4facfe 0%, #00f2fe 100%)',
-            bgSolid: '#4facfe',
-            border: 'rgba(79, 172, 254, 0.3)',
-            hover: 'linear-gradient(135deg, #00f2fe 0%, #4facfe 100%)',
-            shadow: 'rgba(0, 242, 254, 0.4)'
+            bg: 'linear-gradient(135deg, #1d4ed8 0%, #3b82f6 100%)',
+            bgSolid: '#3b82f6',
+            border: 'rgba(59, 130, 246, 0.4)',
+            hover: 'linear-gradient(135deg, #3b82f6 0%, #1d4ed8 100%)',
+            shadow: 'rgba(59, 130, 246, 0.5)'
         },
+        // 粉色 - 赛博粉
         pink: {
-            bg: 'linear-gradient(135deg, #f857a6 0%, #ff5858 100%)',
-            bgSolid: '#f857a6',
-            border: 'rgba(248, 87, 166, 0.3)',
-            hover: 'linear-gradient(135deg, #ff5858 0%, #f857a6 100%)',
-            shadow: 'rgba(255, 88, 88, 0.4)'
+            bg: 'linear-gradient(135deg, #be185d 0%, #ec4899 100%)',
+            bgSolid: '#ec4899',
+            border: 'rgba(236, 72, 153, 0.4)',
+            hover: 'linear-gradient(135deg, #ec4899 0%, #be185d 100%)',
+            shadow: 'rgba(236, 72, 153, 0.5)'
         },
+        // 中性 - 深空灰玻璃
         neutral: {
-            bg: 'linear-gradient(135deg, #bdc3c7 0%, #2c3e50 100%)',
-            bgSolid: '#7f8c8d',
-            border: 'rgba(127, 140, 141, 0.3)',
-            hover: 'linear-gradient(135deg, #2c3e50 0%, #bdc3c7 100%)',
-            shadow: 'rgba(44, 62, 80, 0.4)'
+            bg: 'linear-gradient(135deg, rgba(51, 65, 85, 0.8) 0%, rgba(30, 41, 59, 0.8) 100%)',
+            bgSolid: '#475569',
+            border: 'rgba(148, 163, 184, 0.3)',
+            hover: 'linear-gradient(135deg, rgba(71, 85, 105, 0.9) 0%, rgba(51, 65, 85, 0.9) 100%)',
+            shadow: 'rgba(15, 23, 42, 0.6)'
         },
 
-        // 错误/提示框 - 玻璃拟态风格
+        // 错误/提示框 - 极致磨砂玻璃
         error: {
-            bg: 'rgba(255, 82, 82, 0.1)',
-            border: 'rgba(255, 82, 82, 0.4)',
-            text: '#ff5252',
-            backdrop: 'blur(10px)'
+            bg: 'rgba(244, 63, 94, 0.15)',
+            border: 'rgba(244, 63, 94, 0.5)',
+            text: '#fda4af',
+            backdrop: 'blur(16px) saturate(180%)'
         },
         noResult: {
-            bg: 'rgba(255, 193, 7, 0.1)',
-            border: 'rgba(255, 193, 7, 0.4)',
-            text: '#ffc107',
-            backdrop: 'blur(10px)'
+            bg: 'rgba(245, 158, 11, 0.15)',
+            border: 'rgba(245, 158, 11, 0.5)',
+            text: '#fcd34d',
+            backdrop: 'blur(16px) saturate(180%)'
         },
 
-        // 设置按钮 - 流光渐变
-        settingsGradient: 'linear-gradient(135deg, #667eea 0%, #764ba2 50%, #f857a6 100%)',
+        // 设置按钮 - 赛博幻彩
+        settingsGradient: 'linear-gradient(135deg, #06b6d4 0%, #3b82f6 33%, #8b5cf6 66%, #ec4899 100%)',
 
-        // 玻璃效果
+        // 玻璃效果 - 毛玻璃预设
         glass: {
-            bg: 'rgba(255, 255, 255, 0.1)',
-            border: 'rgba(255, 255, 255, 0.2)',
-            blur: '20px'
+            bg: 'rgba(15, 23, 42, 0.65)',
+            border: 'rgba(255, 255, 255, 0.1)',
+            blur: 'backdrop-filter: blur(20px) saturate(180%); -webkit-backdrop-filter: blur(20px) saturate(180%);'
         },
 
-        // 深色模式基础
+        // 深色模式基础 - 极深渊黑
         dark: {
-            bg: 'rgba(15, 23, 42, 0.95)',
-            card: 'rgba(30, 41, 59, 0.9)',
-            text: '#f1f5f9',
+            bg: 'rgba(2, 6, 23, 0.85)',
+            card: 'rgba(15, 23, 42, 0.75)',
+            border: 'rgba(51, 65, 85, 0.5)',
+            text: '#f8fafc',
             textMuted: '#94a3b8'
         }
     };
@@ -318,7 +338,7 @@
         },
 
         /**
-         * 注入全局CSS动画
+         * 注入全局CSS动画 (Neon Cyberpunk & Glassmorphism)
          */
         injectGlobalStyles() {
             if (document.getElementById('tk-enhanced-styles')) return;
@@ -326,157 +346,222 @@
             const style = document.createElement('style');
             style.id = 'tk-enhanced-styles';
 
-            // 字体异步加载（避免 @import 阻塞 CSS 解析）
+            // 字体异步加载 - 添加一个更具科幻感的字体 (JetBrains Mono) 用于数字和代码
             const fontLink = document.createElement('link');
             fontLink.rel = 'stylesheet';
-            fontLink.href = 'https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap';
+            fontLink.href = 'https://fonts.loli.net/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap';
             document.head.appendChild(fontLink);
 
             style.textContent = `
+                @keyframes spin {
+                    to { transform: rotate(360deg); }
+                }
                 
                 @keyframes fadeIn {
-                    from { opacity: 0; }
-                    to { opacity: 1; }
+                    from { opacity: 0; filter: blur(10px); }
+                    to { opacity: 1; filter: blur(0); }
                 }
                 
                 @keyframes slideIn {
                     from { 
                         opacity: 0; 
-                        transform: translateY(-20px) scale(0.95); 
+                        transform: translateY(20px) scale(0.95); 
+                        filter: blur(10px);
                     }
                     to { 
                         opacity: 1; 
                         transform: translateY(0) scale(1); 
+                        filter: blur(0);
                     }
                 }
                 
-                @keyframes pulse {
-                    0%, 100% { transform: scale(1); }
-                    50% { transform: scale(1.05); }
+                @keyframes neonPulse {
+                    0%, 100% { box-shadow: 0 0 10px rgba(6, 182, 212, 0.5), 0 0 20px rgba(6, 182, 212, 0.3); }
+                    50% { box-shadow: 0 0 20px rgba(6, 182, 212, 0.8), 0 0 40px rgba(6, 182, 212, 0.5); }
                 }
                 
-                @keyframes shimmer {
-                    0% { background-position: -200% center; }
-                    100% { background-position: 200% center; }
+                @keyframes cyberGlow {
+                    0%, 100% { box-shadow: 0 0 15px rgba(236, 72, 153, 0.5), inset 0 0 10px rgba(236, 72, 153, 0.2); }
+                    50% { box-shadow: 0 0 30px rgba(236, 72, 153, 0.8), inset 0 0 20px rgba(236, 72, 153, 0.4); }
                 }
                 
                 @keyframes float {
                     0%, 100% { transform: translateY(0px); }
-                    50% { transform: translateY(-5px); }
+                    50% { transform: translateY(-8px); }
                 }
                 
-                @keyframes glow {
-                    0%, 100% { box-shadow: 0 0 20px rgba(102, 126, 234, 0.4); }
-                    50% { box-shadow: 0 0 30px rgba(248, 87, 166, 0.6); }
+                .tk-btn-hover {
+                    position: relative;
+                    z-index: 1;
+                }
+                
+                .tk-btn-hover::before {
+                    content: '';
+                    position: absolute;
+                    top: 0; left: 0; right: 0; bottom: 0;
+                    border-radius: inherit;
+                    background: inherit;
+                    filter: blur(8px);
+                    opacity: 0;
+                    z-index: -1;
+                    transition: opacity 0.3s ease;
                 }
                 
                 .tk-btn-hover:hover {
-                    transform: translateY(-2px) scale(1.02);
-                    filter: brightness(1.1);
+                    transform: translateY(-2px) scale(1.05);
+                    filter: brightness(1.2) contrast(1.1);
+                    box-shadow: 0 0 15px rgba(255,255,255,0.2) !important;
+                }
+                
+                .tk-btn-hover:hover::before {
+                    opacity: 0.6;
                 }
                 
                 .tk-btn-hover:active {
-                    transform: translateY(0) scale(0.98);
+                    transform: translateY(1px) scale(0.98);
+                    filter: brightness(0.9);
+                }
+                
+                .tk-cover-hover {
+                    border: 1px solid rgba(255,255,255,0.1);
+                    position: relative;
                 }
                 
                 .tk-cover-hover:hover {
-                    transform: translateY(-8px) scale(1.03) rotate(1deg);
-                    box-shadow: 0 20px 60px rgba(0,0,0,0.4),
-                                0 8px 20px rgba(0,0,0,0.2);
+                    transform: translateY(-10px) scale(1.05) perspective(1000px) rotateX(2deg) rotateY(-2deg);
+                    box-shadow: 0 30px 60px rgba(0,0,0,0.6),
+                                0 0 20px rgba(6, 182, 212, 0.4),
+                                inset 0 0 0 1px rgba(255,255,255,0.2);
+                    z-index: 10;
+                    border-color: rgba(6, 182, 212, 0.6);
                 }
                 
                 .tk-info-hover:hover {
                     transform: translateY(-2px);
-                    box-shadow: 0 8px 16px -2px rgba(0, 0, 0, 0.15);
+                    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), 0 0 12px rgba(255,255,255,0.1);
+                    border-color: rgba(255,255,255,0.3);
                 }
                 
                 .tk-settings-fab {
-                    animation: float 3s ease-in-out infinite, glow 2s ease-in-out infinite;
+                    animation: float 4s ease-in-out infinite, cyberGlow 3s ease-in-out infinite;
+                    border: 2px solid rgba(255,255,255,0.15);
+                    background-size: 200% 200%;
                 }
                 
                 .tk-settings-fab:hover {
                     animation: none;
-                    transform: scale(1.15) rotate(180deg) !important;
+                    transform: scale(1.2) rotate(180deg) !important;
+                    box-shadow: 0 0 30px rgba(6, 182, 212, 0.8), 0 0 60px rgba(236, 72, 153, 0.6) !important;
+                    border-color: rgba(255,255,255,0.5);
                 }
                 
-                /* 滚动条美化 */
+                /* 滚动条美化 - 极暗风格 */
                 .tk-modal-scroll::-webkit-scrollbar {
-                    width: 8px;
+                    width: 6px;
+                    height: 6px;
                 }
                 
                 .tk-modal-scroll::-webkit-scrollbar-track {
-                    background: rgba(0,0,0,0.05);
-                    border-radius: 4px;
+                    background: rgba(2, 6, 23, 0.5);
+                    border-radius: 3px;
                 }
                 
                 .tk-modal-scroll::-webkit-scrollbar-thumb {
-                    background: linear-gradient(135deg, #667eea, #764ba2);
-                    border-radius: 4px;
+                    background: rgba(51, 65, 85, 0.8);
+                    border-radius: 3px;
+                    border: 1px solid rgba(255,255,255,0.05);
                 }
                 
                 .tk-modal-scroll::-webkit-scrollbar-thumb:hover {
-                    background: linear-gradient(135deg, #764ba2, #667eea);
+                    background: linear-gradient(180deg, #06b6d4, #6b21a8);
+                    box-shadow: 0 0 10px rgba(6, 182, 212, 0.5);
                 }
                 
-                /* 输入框聚焦效果 */
+                /* 输入框聚焦效果 - 霓虹发光 */
                 .tk-input-modern:focus {
                     outline: none;
-                    border-color: #667eea;
-                    box-shadow: 0 0 0 3px rgba(102, 126, 234, 0.2);
+                    border-color: #06b6d4 !important;
+                    box-shadow: 0 0 0 2px rgba(2, 6, 23, 0.8), 0 0 0 4px rgba(6, 182, 212, 0.5), inset 0 0 8px rgba(6, 182, 212, 0.2) !important;
+                    background: rgba(15, 23, 42, 0.9) !important;
                 }
                 
-                /* 滑块美化 */
+                /* 滑块美化 - 赛博朋克线形 */
                 .tk-slider {
                     -webkit-appearance: none;
                     width: 100%;
-                    height: 8px;
-                    border-radius: 4px;
-                    background: linear-gradient(90deg, #667eea, #764ba2);
+                    height: 4px;
+                    border-radius: 2px;
+                    background: rgba(51, 65, 85, 0.5);
                     outline: none;
                     cursor: pointer;
+                    position: relative;
+                }
+                
+                .tk-slider::before {
+                    content: '';
+                    position: absolute;
+                    top: 0; left: 0; height: 100%;
+                    background: linear-gradient(90deg, #06b6d4, #ec4899);
+                    border-radius: 2px;
+                    width: var(--progress, 50%);
+                    z-index: 1;
+                    box-shadow: 0 0 10px rgba(236, 72, 153, 0.5);
                 }
                 
                 .tk-slider::-webkit-slider-thumb {
                     -webkit-appearance: none;
-                    width: 20px;
-                    height: 20px;
+                    width: 16px;
+                    height: 16px;
                     border-radius: 50%;
-                    background: white;
-                    border: 2px solid #667eea;
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.2);
+                    background: #020617;
+                    border: 2px solid #06b6d4;
+                    box-shadow: 0 0 10px #06b6d4, inset 0 0 4px #06b6d4;
                     cursor: pointer;
-                    transition: all 0.2s;
+                    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+                    position: relative;
+                    z-index: 2;
                 }
                 
                 .tk-slider::-webkit-slider-thumb:hover {
-                    transform: scale(1.2);
-                    box-shadow: 0 4px 12px rgba(102, 126, 234, 0.4);
+                    transform: scale(1.4);
+                    background: #06b6d4;
+                    box-shadow: 0 0 15px #06b6d4, 0 0 30px #06b6d4;
                 }
                 
                 /* 状态信息包装器 */
                 .tk-status-wrapper {
                     display: flex;
                     flex-direction: column;
-                    gap: 8px;
+                    gap: 10px;
                 }
                 
-                /* 刷新重试按钮 */
+                /* 刷新重试按钮 - 强烈对比 */
                 .tk-refresh-btn {
                     display: inline-flex;
                     align-items: center;
                     justify-content: center;
-                    padding: 6px 12px;
-                    background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);
-                    color: #fff;
+                    padding: 8px 16px;
+                    background: rgba(15, 23, 42, 0.8);
+                    color: #06b6d4;
                     border-radius: 8px;
                     font-size: 12px;
-                    font-weight: 600;
-                    font-family: 'Inter', 'Segoe UI', -apple-system, BlinkMacSystemFont, sans-serif;
-                    border: 1px solid rgba(79, 172, 254, 0.3);
+                    font-weight: 700;
+                    font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                    border: 1px solid rgba(6, 182, 212, 0.5);
                     cursor: pointer;
                     max-width: fit-content;
-                    box-shadow: 0 2px 8px rgba(0, 242, 254, 0.4);
-                    transition: all 0.3s ease;
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3), inset 0 0 10px rgba(6, 182, 212, 0.1);
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                }
+                
+                .tk-refresh-btn:hover {
+                    background: rgba(6, 182, 212, 0.1);
+                    border-color: #06b6d4;
+                    box-shadow: 0 0 15px rgba(6, 182, 212, 0.4), inset 0 0 15px rgba(6, 182, 212, 0.2);
+                    color: #fff;
+                    text-shadow: 0 0 5px #06b6d4;
                 }
             `;
             document.head.appendChild(style);
@@ -489,9 +574,17 @@
         cacheOrder: [],         // 缓存访问顺序 (用于 LRU 淘汰和持久化)
         requestQueue: [],
         isProcessing: false,
+        isFetchingPage: false,   // 是否正在请求下一页 (修复 #2)
         settings: { ...CONFIG.defaults },
+        excludeKeywords: typeof GM_getValue === 'function' ? GM_getValue('tk_exclude_keywords', []) : [], // 排除关键字列表
         observer: null,          // MutationObserver 实例
         loadHandler: null,       // load 事件处理函数引用
+        // 分页获取状态
+        currentPageNum: 1,       // 初始加载时的页面页码
+        fetchPageNum: 1,         // 当前正在获取/已获取的最高页码
+        targetValidCount: 8,     // 当前目标要收集的有效项目数
+        consecutiveEmptyPages: 0,// 连续空页计数
+        bannerTimeout: null,     // 提示框倒计时句柄
         // 速率限制追踪
         requestTimestamps: [],  // 记录最近的请求时间戳
         currentBackoff: 0,      // 当前退避时间
@@ -504,6 +597,7 @@
             const saved = GM_getValue(CONFIG.storageKey, null);
             if (saved) {
                 try {
+                    // 防御性设计：防范历史旧版本以 JSON 字符串形式持久化在 GM 存储中 (优化 #12)
                     const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
                     state.settings = { ...CONFIG.defaults, ...parsed };
                 } catch (e) {
@@ -551,8 +645,7 @@
                         GM_deleteValue(this.STORAGE_KEY + '_' + item.code);
                         return false;
                     });
-                    // 构建 Map 索引以加速查找
-                    this._rebuildOrderMap();
+                    // 移除重建 Map 索引逻辑，采用更高效的 findIndex 方案 (修复 #3)
                 } else {
                     state.cacheOrder = [];
                 }
@@ -562,6 +655,7 @@
                     const cached = GM_getValue(this.STORAGE_KEY + '_' + item.code, null);
                     if (cached) {
                         try {
+                            // 防御性设计：防范历史旧版本以 JSON 字符串形式持久化在 GM 存储中 (优化 #12)
                             const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
                             state.javdbCache[item.code] = data;
                         } catch (e) {
@@ -599,6 +693,7 @@
             try {
                 const cached = GM_getValue(this.STORAGE_KEY + '_' + code, null);
                 if (cached) {
+                    // 防御性设计：防范历史旧版本以 JSON 字符串形式持久化在 GM 存储中 (优化 #12)
                     const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
                     // 写入内存
                     state.javdbCache[code] = data;
@@ -650,29 +745,16 @@
         },
 
         /**
-         * 更新访问顺序
+         * 更新访问顺序 (修复 #3 - 实时 findIndex 定位避免索引失效)
          */
         _updateOrder(code) {
             const now = Date.now();
-            // O(1) 查找并移除旧位置
-            const oldIndex = state.cacheOrderMap?.get(code);
-            if (oldIndex !== undefined) {
-                state.cacheOrder.splice(oldIndex, 1);
+            const index = state.cacheOrder.findIndex(item => item.code === code);
+            if (index !== -1) {
+                state.cacheOrder.splice(index, 1);
             }
             // 添加到末尾 (最近访问)
             state.cacheOrder.push({ code, timestamp: now });
-            // 重建 Map 索引
-            this._rebuildOrderMap();
-        },
-
-        /**
-         * 重建缓存顺序索引 Map
-         */
-        _rebuildOrderMap() {
-            state.cacheOrderMap = new Map();
-            state.cacheOrder.forEach((item, index) => {
-                state.cacheOrderMap.set(item.code, index);
-            });
         },
 
         /**
@@ -804,7 +886,15 @@
         },
 
         async process() {
-            if (state.isProcessing || state.requestQueue.length === 0) return;
+            if (state.isProcessing || state.requestQueue.length === 0) {
+                if (!state.isProcessing && state.requestQueue.length === 0 && typeof App !== 'undefined' && App.showStatusBanner) {
+                    const banner = document.getElementById('tk-status-banner');
+                    if (banner && banner.innerText.includes('排队加载封面')) {
+                        App.showStatusBanner('封面加载完成！', true);
+                    }
+                }
+                return;
+            }
 
             // 检查速率限制
             if (this.isRateLimited()) {
@@ -982,8 +1072,23 @@
             // 更新 JavDB 按钮
             this.updateJavDBButton(javdbBtn, url);
 
-            // 更新封面
-            this.updateCover(coverContainer, coverId, debugInfo);
+            // 更新封面展示区域
+            const { fetchStatus, foundResult } = debugInfo;
+            if (fetchStatus === 'ERROR') {
+                this.showStatusMessage(coverContainer, debugInfo, {
+                    icon: '❌',
+                    text: '[ERROR] NETWORK_FAIL',
+                    color: { border: '#ef4444', text: '#ef4444' }
+                });
+            } else if (!foundResult) {
+                this.showStatusMessage(coverContainer, debugInfo, {
+                    icon: '🚫',
+                    text: '[INFO] NO_RECORD_FOUND',
+                    color: { border: '#f59e0b', text: '#fcd34d' }
+                });
+            } else {
+                this.updateCover(coverContainer, coverId, debugInfo);
+            }
         },
 
         /**
@@ -994,13 +1099,19 @@
 
             if (url) {
                 btn.href = url;
-                btn.innerText = '🎬 JavDB';
-                btn.style.background = COLORS.primary.bg;
-                btn.style.boxShadow = `0 4px 15px ${COLORS.primary.shadow}`;
+                btn.innerText = '🔗 DB_LINK';
+                btn.style.background = 'rgba(6, 182, 212, 0.15)';
+                btn.style.border = '1px solid rgba(6, 182, 212, 0.5)';
+                btn.style.color = '#06b6d4';
+                btn.style.fontFamily = "'JetBrains Mono', sans-serif";
+                btn.style.boxShadow = `0 4px 15px rgba(6, 182, 212, 0.2)`;
             } else {
-                btn.innerText = '❌ 无结果';
-                btn.style.background = COLORS.neutral.bg;
-                btn.style.boxShadow = `0 4px 15px ${COLORS.neutral.shadow}`;
+                btn.innerText = 'Ø NO_LINK';
+                btn.style.background = 'rgba(15, 23, 42, 0.8)';
+                btn.style.border = '1px solid rgba(148, 163, 184, 0.3)';
+                btn.style.color = '#94a3b8';
+                btn.style.fontFamily = "'JetBrains Mono', sans-serif";
+                btn.style.boxShadow = `0 4px 15px rgba(0, 0, 0, 0.3)`;
                 btn.href = '#';
                 btn.onclick = (e) => e.preventDefault();
             }
@@ -1016,9 +1127,9 @@
                 this.showCoverImage(container, coverId, debugInfo);
             } else {
                 this.showStatusMessage(container, debugInfo, {
-                    icon: 'ℹ️',
-                    text: '未找到封面信息',
-                    color: COLORS.noResult
+                    icon: '⚠️',
+                    text: '[ERROR] NOT_FOUND',
+                    color: { border: '#eab308', text: '#eab308' }
                 });
             }
         },
@@ -1028,14 +1139,43 @@
          */
         showCoverImage(container, coverId, debugInfo) {
             const coverUrl = JavDBService.getCoverUrl(coverId);
-            const img = document.createElement('img');
+            const { coverWidth, coverHeight } = state.settings;
+            
+            // 重置容器，应用极简发光风格边框
+            container.innerHTML = '';
+            container.style.padding = '0';
+            container.style.background = 'transparent';
+            container.style.border = 'none';
+            container.style.boxShadow = 'none';
 
+            const wrapper = document.createElement('div');
+            wrapper.className = 'tk-cover-hover';
+            wrapper.style.cssText = `
+                position: relative; 
+                display: inline-block;
+                border-radius: 8px;
+                overflow: hidden;
+                box-shadow: 0 4px 15px rgba(0,0,0,0.5), 0 0 10px rgba(6, 182, 212, 0.1);
+                background: rgba(2, 6, 23, 0.9);
+                border: 1px solid rgba(6, 182, 212, 0.3);
+                transition: all 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+            `;
+
+            const link = document.createElement('a');
+            link.href = coverUrl;
+            link.target = '_blank';
+            link.style.display = 'block';
+
+            const img = document.createElement('img');
             img.src = coverUrl;
-            img.className = 'javdb-cover-img tk-cover-hover';
-            img.style.cssText = StyleUtils.coverImage(
-                state.settings.coverWidth,
-                state.settings.coverHeight
-            );
+            img.className = 'javdb-cover-img';
+            img.alt = 'Cover';
+            img.style.cssText = `
+                max-width: ${coverWidth}px; 
+                max-height: ${coverHeight}px; 
+                display: block;
+                transition: transform 0.5s ease;
+            `;
 
             // 加载成功
             img.onload = () => {
@@ -1047,20 +1187,55 @@
             // 加载失败
             img.onerror = () => {
                 debugInfo.imageLoadSuccess = false;
-                debugInfo.imageError = '图片 HTTP 请求失败（404 或网络错误）';
+                debugInfo.imageError = 'HTTP 请求失败（404 或网络错误）';
                 container.dataset.debugInfo = JSON.stringify(debugInfo);
                 this.showStatusMessage(container, debugInfo, {
-                    icon: '⚠️',
-                    text: '封面加载失败',
-                    color: COLORS.error
+                    icon: '🚫',
+                    text: '[ERROR] LOAD_FAILED',
+                    color: { border: '#ef4444', text: '#ef4444' }
                 });
             };
 
-            container.innerHTML = '';
-            container.appendChild(img);
+            const fallbackMsg = document.createElement('div');
+            fallbackMsg.style.cssText = `
+                display: none; 
+                position: absolute; 
+                bottom: 0; left: 0; right: 0; 
+                background: rgba(244, 63, 94, 0.9); 
+                color: #fff; 
+                text-align: center; 
+                padding: 6px; 
+                font-size: 11px;
+                font-family: 'JetBrains Mono', monospace;
+                letter-spacing: 1px;
+                text-transform: uppercase;
+                border-top: 1px solid rgba(255, 255, 255, 0.2);
+            `;
+            fallbackMsg.innerText = '[WARN] PROXY_REQUIRED';
+            
+            // 绑定 onError 用于显示代理提醒 (这主要是处理本地被拦截但能触发onerror的情况)
+            img.onerror = function() {
+                this.onerror=null; 
+                // base64 SVG placeholder (赛博红)
+                this.src='data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSJyZ2JhKDIsIDYsIDIzLCAwLjkpIi8+PHRleHQgeD0iNTAlIiB5PSI1MCUiIGZvbnQtZmFtaWx5PSJtb25vc3BhY2UiIGZvbnQtc2l6ZT0iMTIiIGZpbGw9IiNlZjQ0NDQiIHRleHQtYW5jaG9yPSJtaWRkbGUiIGR5PSIuM2VtIj5bSU1BR0VfRkFJTF08L3RleHQ+PC9zdmc+'; 
+                this.nextElementSibling.style.display='block';
+                
+                debugInfo.imageLoadSuccess = false;
+                debugInfo.imageError = 'Image loading blocked or 404';
+                container.dataset.debugInfo = JSON.stringify(debugInfo);
+            };
 
-            // 点击查看调试信息
-            img.onclick = () => ModalManager.showDebugInfo(debugInfo);
+            link.appendChild(img);
+            link.appendChild(fallbackMsg);
+            wrapper.appendChild(link);
+            container.appendChild(wrapper);
+
+            // 阻止冒泡，避免点击图片触发容器的点击事件（若有），同时点击包装器可查看调试
+            wrapper.onclick = (e) => {
+                if (e.target.tagName !== 'IMG') {
+                    ModalManager.showDebugInfo(debugInfo);
+                }
+            };
         },
 
         /**
@@ -1077,13 +1252,38 @@
 
             const msgDiv = document.createElement('div');
             msgDiv.className = 'tk-info-hover';
-            msgDiv.style.cssText = StyleUtils.infoBox(color, state.settings.coverWidth);
-            msgDiv.innerHTML = `${icon} ${text}<br><small style="opacity: 0.8;">点击查看 Debug 信息</small>`;
+            msgDiv.style.cssText = `
+                width: ${state.settings.coverWidth}px;
+                padding: 16px;
+                background: rgba(2, 6, 23, 0.8);
+                border: 1px solid ${color.border};
+                border-radius: 8px;
+                color: ${color.text || color.bgSolid};
+                text-align: center;
+                font-size: 13px;
+                cursor: pointer;
+                transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                box-shadow: 0 4px 15px rgba(0,0,0,0.5), inset 0 0 10px ${color.border};
+                font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                backdrop-filter: blur(10px);
+                box-sizing: border-box;
+                display: flex;
+                flex-direction: column;
+                justify-content: center;
+                align-items: center;
+                min-height: ${state.settings.coverHeight / 2}px;
+            `;
+            msgDiv.innerHTML = `
+                <div style="font-size: 24px; margin-bottom: 8px; filter: drop-shadow(0 0 8px ${color.border});">${icon}</div>
+                <div style="font-weight: 700; letter-spacing: 1px; text-transform: uppercase;">${text}</div>
+                <small style="opacity: 0.6; margin-top: 8px; font-size: 10px; font-family: 'JetBrains Mono', monospace;">[CLICK_FOR_DIAGNOSTICS]</small>
+            `;
             msgDiv.onclick = () => ModalManager.showDebugInfo(debugInfo);
 
             const refreshBtn = document.createElement('button');
             refreshBtn.className = 'tk-btn-hover tk-refresh-btn';
-            refreshBtn.innerHTML = '🔄 刷新重试';
+            refreshBtn.innerHTML = 'RETRY_SYNC';
+            refreshBtn.style.marginTop = '10px';
             refreshBtn.onclick = (e) => {
                 e.stopPropagation();
                 this.refreshCover(container, debugInfo.code);
@@ -1100,10 +1300,23 @@
         refreshCover(container, code) {
             // 显示加载中状态
             container.innerHTML = `
-                <span style="display: inline-flex; align-items: center; gap: 8px;">
-                    <span style="display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(102, 126, 234, 0.3); border-top-color: #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></span>
-                    <span>重新加载中...</span>
-                </span>
+                <div style="
+                    margin-top: 12px; 
+                    font-size: 12px; 
+                    color: #94a3b8;
+                    font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                    padding: 14px 18px;
+                    background: linear-gradient(145deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.9));
+                    border-radius: 8px;
+                    border: 1px solid rgba(6, 182, 212, 0.2);
+                    display: inline-block;
+                    box-shadow: 0 10px 20px rgba(0,0,0,0.5), inset 0 0 15px rgba(6, 182, 212, 0.05);
+                ">
+                    <span style="display: inline-flex; align-items: center; gap: 10px;">
+                        <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(6, 182, 212, 0.2); border-top-color: #06b6d4; border-radius: 50%; animation: spin 1s linear infinite, neonPulse 2s infinite;"></span>
+                        <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">RE-SYNCING...</span>
+                    </span>
+                </div>
             `;
 
             // 删除缓存
@@ -1130,6 +1343,11 @@
 
             document.querySelectorAll('.javdb-cover-container > div').forEach(div => {
                 div.style.maxWidth = `${coverWidth}px`;
+            });
+            
+            // 同步更新消息框的宽度
+            document.querySelectorAll('.tk-info-hover').forEach(div => {
+                div.style.width = `${coverWidth}px`;
             });
         }
     };
@@ -1164,6 +1382,9 @@
                 fontSize: '14px',
                 margin: '0'
             });
+            btn.style.fontFamily = "'JetBrains Mono', 'Inter', sans-serif";
+            btn.style.letterSpacing = "1px";
+            btn.style.textTransform = "uppercase";
             btn.onclick = onClick;
             return btn;
         },
@@ -1176,27 +1397,32 @@
 
             const modal = document.createElement('div');
             modal.className = 'tk-modal-scroll';
-            modal.style.cssText = StyleUtils.modal();
+            modal.style.cssText = StyleUtils.modal({ maxWidth: '750px' });
+            modal.style.background = 'linear-gradient(145deg, rgba(15, 23, 42, 0.95), rgba(2, 6, 23, 0.98))';
+            modal.style.border = '1px solid rgba(6, 182, 212, 0.3)';
+            modal.style.boxShadow = '0 30px 60px rgba(0, 0, 0, 0.6), 0 0 20px rgba(6, 182, 212, 0.2)';
 
-            // 标题 - 渐变效果
+            // 标题 - 赛博渐变效果
             const title = document.createElement('h3');
-            title.innerHTML = '🔍 <span style="background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">Debug 信息</span>';
+            title.innerHTML = '⚡ <span style="background: linear-gradient(135deg, #06b6d4, #ec4899); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text; text-transform: uppercase; letter-spacing: 2px;">System Debug Log</span>';
             title.style.cssText = `
                 margin: 0 0 20px 0; 
-                color: #1e293b; 
-                font-size: 22px;
+                color: #f8fafc; 
+                font-size: 20px;
                 font-weight: 700;
-                font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                font-family: 'JetBrains Mono', 'Segoe UI', sans-serif;
                 display: flex;
                 align-items: center;
-                gap: 8px;
+                gap: 12px;
+                border-bottom: 1px solid rgba(6, 182, 212, 0.2);
+                padding-bottom: 12px;
             `;
 
-            // 文本框 - 现代化样式
+            // 文本框 - 极简代码风
             const textarea = document.createElement('textarea');
             textarea.value = info;
             textarea.readOnly = true;
-            textarea.className = 'tk-input-modern';
+            textarea.className = 'tk-input-modern tk-modal-scroll';
             textarea.style.cssText = `
                 width: 100%;
                 height: 420px;
@@ -1204,27 +1430,28 @@
                 font-size: 13px;
                 line-height: 1.6;
                 padding: 16px;
-                background: linear-gradient(145deg, #f8fafc, #f1f5f9);
-                border: 1px solid rgba(102, 126, 234, 0.2);
-                border-radius: 12px;
+                background: rgba(2, 6, 23, 0.8);
+                border: 1px solid rgba(6, 182, 212, 0.3);
+                border-radius: 8px;
                 resize: vertical;
                 box-sizing: border-box;
-                color: #334155;
+                color: #06b6d4;
                 transition: all 0.3s ease;
+                text-shadow: 0 0 5px rgba(6, 182, 212, 0.3);
             `;
 
             // 按钮容器
             const buttonContainer = document.createElement('div');
-            buttonContainer.style.cssText = 'margin-top: 20px; display: flex; gap: 12px; justify-content: flex-end;';
+            buttonContainer.style.cssText = 'margin-top: 24px; display: flex; gap: 12px; justify-content: flex-end;';
 
             buttonContainer.appendChild(
-                this.createButton('📋 全选', COLORS.success, () => {
+                this.createButton('📋 COPY_ALL', COLORS.primary, () => {
                     textarea.select();
                     textarea.setSelectionRange(0, textarea.value.length);
                 })
             );
 
-            const closeBtn = this.createButton('✕ 关闭', COLORS.primary, null);
+            const closeBtn = this.createButton('✕ CLOSE', COLORS.neutral, null);
             buttonContainer.appendChild(closeBtn);
 
             modal.append(title, textarea, buttonContainer);
@@ -1238,38 +1465,33 @@
          * 格式化调试信息
          */
         formatDebugInfo(debugInfo) {
-            return `╔══════════════════════════════════════════════════════╗
-║         JavDB 封面加载 Debug 信息                    ║
-╚══════════════════════════════════════════════════════╝
+            return `>> SYSTEM DIAGNOSTICS: JAVDB MODULE
+============================================================
 
-┌─── 📋 基本信息 ───────────────────────────────────────
-│ 番号: ${debugInfo.code}
-│ 时间: ${debugInfo.timestamp}
-└───────────────────────────────────────────────────────
+[+] BASIC_INFO
+    |- CODE: ${debugInfo.code}
+    |- TIMESTAMP: ${debugInfo.timestamp}
 
-┌─── 🔍 搜索请求 ───────────────────────────────────────
-│ URL: ${debugInfo.fetchUrl}
-│ 状态: ${debugInfo.fetchStatus}
-└───────────────────────────────────────────────────────
+[+] NETWORK_REQUEST
+    |- URL: ${debugInfo.fetchUrl}
+    |- STATUS: ${debugInfo.fetchStatus}
 
-┌─── 📊 搜索结果 ───────────────────────────────────────
-│ 找到结果: ${debugInfo.foundResult ? '✅ 是' : '❌ 否'}
-│ JavDB 页面: ${debugInfo.javdbUrl || '无'}
-│ 封面 ID: ${debugInfo.coverId || '无'}
-└───────────────────────────────────────────────────────
+[+] SEARCH_RESULTS
+    |- MATCH_FOUND: ${debugInfo.foundResult ? '[ OK ]' : '[ FAIL ]'}
+    |- JAVDB_LINK: ${debugInfo.javdbUrl || 'N/A'}
+    |- COVER_ID: ${debugInfo.coverId || 'N/A'}
 
-┌─── 🖼️ 封面图片 ───────────────────────────────────────
-│ URL: ${debugInfo.coverUrl || '无'}
-│ 加载成功: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '✅ 是' : '❌ 否') : '⏳ 未尝试'}
-│ 图片尺寸: ${debugInfo.imageSize || '未知'}
-│ 图片错误: ${debugInfo.imageError || '无'}
-└───────────────────────────────────────────────────────
+[+] ASSET_LOAD
+    |- URL: ${debugInfo.coverUrl || 'N/A'}
+    |- LOAD_SUCCESS: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '[ OK ]' : '[ FAIL ]') : '[ PENDING ]'}
+    |- DIMENSIONS: ${debugInfo.imageSize || 'UNKNOWN'}
+    |- ERRORS: ${debugInfo.imageError || 'NONE'}
 
-┌─── ⚠️ 错误信息 ───────────────────────────────────────
-│ ${debugInfo.errorMessage || '无'}
-└───────────────────────────────────────────────────────
+[!] EXCEPTIONS
+    |- ${debugInfo.errorMessage || 'NONE_DETECTED'}
 
-💡 提示：可以全选复制此文本框内容进行反馈`;
+============================================================
+>> EOF`;
         },
 
         /**
@@ -1278,52 +1500,66 @@
         showSettings() {
             const panel = document.createElement('div');
             panel.className = 'tk-modal-scroll';
-            panel.style.cssText = StyleUtils.modal({ maxWidth: '480px', padding: '36px' });
+            panel.style.cssText = StyleUtils.modal({ maxWidth: '520px', padding: '36px' });
+            panel.style.background = 'linear-gradient(145deg, rgba(15, 23, 42, 0.95), rgba(2, 6, 23, 0.98))';
+            panel.style.border = '1px solid rgba(236, 72, 153, 0.3)';
+            panel.style.boxShadow = '0 30px 60px rgba(0, 0, 0, 0.6), 0 0 30px rgba(236, 72, 153, 0.2)';
 
             panel.innerHTML = `
                 <h2 style="
                     margin: 0 0 28px 0; 
-                    font-size: 24px;
+                    font-size: 22px;
                     font-weight: 700;
-                    font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                    font-family: 'JetBrains Mono', 'Inter', sans-serif;
                     display: flex;
                     align-items: center;
                     gap: 12px;
+                    border-bottom: 1px solid rgba(236, 72, 153, 0.2);
+                    padding-bottom: 16px;
+                    letter-spacing: 2px;
+                    text-transform: uppercase;
                 ">
-                    <span style="font-size: 28px;">⚙️</span>
-                    <span style="background: linear-gradient(135deg, #667eea, #764ba2); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">封面尺寸设置</span>
+                    <span style="font-size: 24px; text-shadow: 0 0 10px rgba(236, 72, 153, 0.8);">⚙️</span>
+                    <span style="background: linear-gradient(135deg, #ec4899, #8b5cf6); -webkit-background-clip: text; -webkit-text-fill-color: transparent; background-clip: text;">System_Config</span>
                 </h2>
 
                 <div style="
-                    background: linear-gradient(145deg, #f8fafc, #f1f5f9);
-                    border-radius: 16px;
+                    background: rgba(2, 6, 23, 0.6);
+                    border-radius: 12px;
                     padding: 24px;
-                    margin-bottom: 24px;
-                    border: 1px solid rgba(102, 126, 234, 0.1);
+                    margin-bottom: 30px;
+                    border: 1px solid rgba(6, 182, 212, 0.2);
+                    box-shadow: inset 0 0 20px rgba(0,0,0,0.5);
                 ">
-                    <div style="margin-bottom: 28px;">
+                    <div style="margin-bottom: 32px;">
                         <label style="
                             display: flex;
                             justify-content: space-between;
                             align-items: center;
-                            margin-bottom: 12px; 
-                            color: #475569; 
-                            font-size: 15px;
+                            margin-bottom: 16px; 
+                            color: #94a3b8; 
+                            font-size: 14px;
                             font-weight: 600;
-                            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                            font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                            text-transform: uppercase;
+                            letter-spacing: 1px;
                         ">
-                            <span>📐 宽度</span>
+                            <span style="display: flex; align-items: center; gap: 8px;">
+                                <span style="color: #06b6d4;">[W]</span> X_AXIS_WIDTH
+                            </span>
                             <span style="
-                                background: linear-gradient(135deg, #667eea, #764ba2);
-                                color: white;
+                                background: rgba(6, 182, 212, 0.15);
+                                color: #06b6d4;
                                 padding: 4px 12px;
-                                border-radius: 20px;
+                                border-radius: 4px;
                                 font-size: 13px;
                                 font-weight: 700;
-                            "><span id="width-value">${state.settings.coverWidth}</span>px</span>
+                                border: 1px solid rgba(6, 182, 212, 0.4);
+                                box-shadow: 0 0 10px rgba(6, 182, 212, 0.2);
+                            "><span id="width-value">${state.settings.coverWidth}</span> PX</span>
                         </label>
                         <input type="range" id="width-slider" class="tk-slider" min="100" max="800" 
-                               value="${state.settings.coverWidth}">
+                               value="${state.settings.coverWidth}" style="--progress: ${((state.settings.coverWidth - 100) / 700) * 100}%;">
                     </div>
 
                     <div>
@@ -1331,24 +1567,30 @@
                             display: flex;
                             justify-content: space-between;
                             align-items: center;
-                            margin-bottom: 12px; 
-                            color: #475569; 
-                            font-size: 15px;
+                            margin-bottom: 16px; 
+                            color: #94a3b8; 
+                            font-size: 14px;
                             font-weight: 600;
-                            font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
+                            font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                            text-transform: uppercase;
+                            letter-spacing: 1px;
                         ">
-                            <span>📏 高度</span>
+                            <span style="display: flex; align-items: center; gap: 8px;">
+                                <span style="color: #ec4899;">[H]</span> Y_AXIS_HEIGHT
+                            </span>
                             <span style="
-                                background: linear-gradient(135deg, #667eea, #764ba2);
-                                color: white;
+                                background: rgba(236, 72, 153, 0.15);
+                                color: #ec4899;
                                 padding: 4px 12px;
-                                border-radius: 20px;
+                                border-radius: 4px;
                                 font-size: 13px;
                                 font-weight: 700;
-                            "><span id="height-value">${state.settings.coverHeight}</span>px</span>
+                                border: 1px solid rgba(236, 72, 153, 0.4);
+                                box-shadow: 0 0 10px rgba(236, 72, 153, 0.2);
+                            "><span id="height-value">${state.settings.coverHeight}</span> PX</span>
                         </label>
                         <input type="range" id="height-slider" class="tk-slider" min="100" max="600" 
-                               value="${state.settings.coverHeight}">
+                               value="${state.settings.coverHeight}" style="--progress: ${((state.settings.coverHeight - 100) / 500) * 100}%;">
                     </div>
                 </div>
 
@@ -1369,23 +1611,29 @@
             const heightValue = panel.querySelector('#height-value');
             const buttonsContainer = panel.querySelector('#settings-buttons');
 
-            // 滑块事件
-            widthSlider.oninput = () => widthValue.textContent = widthSlider.value;
-            heightSlider.oninput = () => heightValue.textContent = heightSlider.value;
+            // 滑块事件 - 同步更新自定义属性用于进度条颜色填充
+            widthSlider.oninput = () => {
+                widthValue.textContent = widthSlider.value;
+                widthSlider.style.setProperty('--progress', `${((widthSlider.value - 100) / 700) * 100}%`);
+            };
+            heightSlider.oninput = () => {
+                heightValue.textContent = heightSlider.value;
+                heightSlider.style.setProperty('--progress', `${((heightSlider.value - 100) / 500) * 100}%`);
+            };
 
             // 重置按钮
             buttonsContainer.appendChild(
-                this.createButton('🔄 重置', COLORS.warning, () => {
+                this.createButton('RESET_DEF', COLORS.warning, () => {
                     widthSlider.value = CONFIG.defaults.coverWidth;
                     heightSlider.value = CONFIG.defaults.coverHeight;
-                    widthValue.textContent = CONFIG.defaults.coverWidth;
-                    heightValue.textContent = CONFIG.defaults.coverHeight;
+                    widthSlider.oninput();
+                    heightSlider.oninput();
                 })
             );
 
             // 保存按钮
             buttonsContainer.appendChild(
-                this.createButton('✓ 保存', COLORS.success, () => {
+                this.createButton('SAVE_SYS', COLORS.primary, () => {
                     state.settings.coverWidth = parseInt(widthSlider.value);
                     state.settings.coverHeight = parseInt(heightSlider.value);
                     SettingsManager.save();
@@ -1396,7 +1644,7 @@
 
             // 取消按钮
             buttonsContainer.appendChild(
-                this.createButton('✕ 取消', COLORS.neutral, () => overlay.remove())
+                this.createButton('ABORT', COLORS.neutral, () => overlay.remove())
             );
         }
     };
@@ -1441,7 +1689,7 @@
                 box-shadow: 0 8px 32px rgba(102, 126, 234, 0.5),
                             0 4px 12px rgba(0,0,0,0.15),
                             inset 0 2px 0 rgba(255,255,255,0.2);
-                z-index: 9999;
+                z-index: 10000;
                 transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
                 border: 2px solid rgba(255,255,255,0.2);
             `;
@@ -1452,13 +1700,169 @@
         }
     };
 
+    // ==================== 排除关键字管理器 ====================
+    const ExclusionManager = {
+        init() {
+            this.renderUI();
+        },
+        saveKeywords() {
+            if (typeof GM_setValue === 'function') {
+                GM_setValue('tk_exclude_keywords', state.excludeKeywords);
+            }
+        },
+        addKeyword(kw) {
+            kw = kw.trim();
+            if (kw && !state.excludeKeywords.includes(kw)) {
+                state.excludeKeywords.push(kw);
+                this.saveKeywords();
+                this.updateList();
+                this.applyExclusion();
+            }
+        },
+        removeKeyword(kw) {
+            state.excludeKeywords = state.excludeKeywords.filter(k => k !== kw);
+            this.saveKeywords();
+            this.updateList();
+            this.applyExclusion();
+        },
+        applyExclusion() {
+            // 重新过滤，排除被标记的数据
+            if (typeof App !== 'undefined') {
+                App.processRows();
+                // 排除后可能不足 8 个，触发一次补充加载
+                App.checkPaginationAndDispatch();
+            }
+        },
+        renderUI() {
+            const container = document.createElement('div');
+            container.id = 'tk-exclusion-panel';
+            container.style.cssText = `
+                position: fixed;
+                bottom: 100px;
+                right: 32px;
+                background: linear-gradient(145deg, rgba(15, 23, 42, 0.95), rgba(2, 6, 23, 0.98));
+                border: 1px solid rgba(236, 72, 153, 0.4);
+                border-radius: 12px;
+                padding: 16px;
+                width: 280px;
+                box-shadow: 0 10px 30px rgba(0,0,0,0.8), 0 0 15px rgba(236, 72, 153, 0.2);
+                backdrop-filter: blur(10px);
+                z-index: 9999;
+                color: #f8fafc;
+                font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+            `;
+            const header = document.createElement('div');
+            header.style.cssText = 'display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; cursor: pointer; border-bottom: 1px solid rgba(236, 72, 153, 0.2); padding-bottom: 8px;';
+            header.innerHTML = `<span style="font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 1px; color: #ec4899; text-shadow: 0 0 5px rgba(236, 72, 153, 0.5);">🛡️ FILTER_RULES</span><span id="tk-exc-toggle" style="font-size: 12px; color: #ec4899;">▼</span>`;
+            
+            const body = document.createElement('div');
+            body.id = 'tk-exc-body';
+            
+            const inputArea = document.createElement('div');
+            inputArea.style.cssText = 'display: flex; gap: 8px; margin-bottom: 12px;';
+            
+            const input = document.createElement('input');
+            input.type = 'text';
+            input.placeholder = 'INPUT_KEYWORD...';
+            input.className = 'tk-input-modern';
+            input.style.cssText = `
+                flex: 1;
+                background: rgba(2, 6, 23, 0.6);
+                border: 1px solid rgba(6, 182, 212, 0.3);
+                color: #06b6d4;
+                border-radius: 6px;
+                padding: 8px 10px;
+                font-size: 12px;
+                outline: none;
+                font-family: 'JetBrains Mono', monospace;
+                transition: all 0.3s ease;
+            `;
+            
+            const btn = document.createElement('button');
+            btn.innerText = 'ADD';
+            btn.className = 'tk-btn-hover';
+            btn.style.cssText = StyleUtils.buttonBase(COLORS.primary, { padding: '8px 12px', fontSize: '12px', margin: '0' });
+            btn.style.fontFamily = "'JetBrains Mono', sans-serif";
+            btn.style.fontWeight = "bold";
+            
+            btn.onclick = () => {
+                if (input.value) {
+                    this.addKeyword(input.value);
+                    input.value = '';
+                }
+            };
+            input.onkeypress = (e) => {
+                if (e.key === 'Enter') btn.onclick();
+            };
+            
+            inputArea.appendChild(input);
+            inputArea.appendChild(btn);
+            body.appendChild(inputArea);
+            
+            const listArea = document.createElement('div');
+            listArea.id = 'tk-exc-list';
+            listArea.className = 'tk-modal-scroll';
+            listArea.style.cssText = 'display: flex; flex-wrap: wrap; gap: 8px; max-height: 150px; overflow-y: auto; padding-right: 4px;';
+            
+            body.appendChild(listArea);
+            container.appendChild(header);
+            container.appendChild(body);
+            
+            // 默认折叠以防遮挡
+            let isCollapsed = true;
+            body.style.display = 'none';
+            header.querySelector('#tk-exc-toggle').innerText = '▲';
+            
+            header.onclick = () => {
+                isCollapsed = !isCollapsed;
+                body.style.display = isCollapsed ? 'none' : 'block';
+                header.querySelector('#tk-exc-toggle').innerText = isCollapsed ? '▲' : '▼';
+            };
+            
+            document.body.appendChild(container);
+            this.updateList();
+        },
+        updateList() {
+            const listArea = document.getElementById('tk-exc-list');
+            if (!listArea) return;
+            listArea.innerHTML = '';
+            state.excludeKeywords.forEach(kw => {
+                const tag = document.createElement('span');
+                tag.style.cssText = `
+                    background: rgba(244, 63, 94, 0.15);
+                    border: 1px solid rgba(244, 63, 94, 0.4);
+                    color: #fda4af;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-size: 11px;
+                    display: flex;
+                    align-items: center;
+                    gap: 6px;
+                    box-shadow: 0 0 10px rgba(244, 63, 94, 0.1);
+                `;
+                tag.innerText = kw;
+                
+                const del = document.createElement('span');
+                del.innerText = '×';
+                del.style.cssText = 'cursor: pointer; font-weight: bold; font-size: 14px; transition: color 0.2s; color: #f43f5e;';
+                del.onmouseover = () => del.style.color = '#fff';
+                del.onmouseout = () => del.style.color = '#f43f5e';
+                del.onclick = () => this.removeKeyword(kw);
+                
+                tag.appendChild(del);
+                listArea.appendChild(tag);
+            });
+        }
+    };
+
     // ==================== 原站按钮美化 ====================
     const OriginalButtonStyler = {
         // 按钮类型映射
         buttonTypes: [
-            { keywords: ['Detail', '详情'], color: COLORS.info },
-            { keywords: ['Open', '打开'], color: COLORS.success },
-            { keywords: ['Download', '下载'], color: COLORS.danger }
+            { keywords: ['Detail', '详情'], color: COLORS.info, newText: 'DETAILS' },
+            { keywords: ['Open', '打开'], color: COLORS.success, newText: 'OPEN_LINK' },
+            { keywords: ['Download', '下载'], color: COLORS.danger, newText: 'DOWNLOAD_MAGNET' }
         ],
 
         /**
@@ -1472,8 +1876,16 @@
 
                 for (const type of this.buttonTypes) {
                     if (type.keywords.some(keyword => text.includes(keyword))) {
-                        btn.classList.add('tk-styled');
+                        btn.classList.add('tk-styled', 'tk-btn-hover');
                         btn.style.cssText = StyleUtils.buttonBase(type.color);
+                        btn.style.fontFamily = "'JetBrains Mono', monospace";
+                        btn.style.fontWeight = "bold";
+                        btn.style.letterSpacing = "1px";
+                        if (btn.tagName === 'INPUT') {
+                            btn.value = type.newText;
+                        } else {
+                            btn.innerText = type.newText;
+                        }
                         break;
                     }
                 }
@@ -1484,17 +1896,109 @@
     // ==================== 主逻辑 ====================
     const App = {
         /**
-         * 处理表格行
+         * 辅助方法：统一查找结果表格 (优化 #15)
+         */
+        _findResultTable(doc = document) {
+            return doc.querySelector('table#archiveResult') || doc.querySelector('table.results') || doc.querySelector('.search-results table');
+        },
+
+        /**
+         * 获取精准搜索结果行
+         */
+        getResultRows(doc = document) {
+            const table = this._findResultTable(doc);
+            if (table) {
+                return Array.from(table.querySelectorAll('tr')).slice(1); // 过滤掉表头
+            }
+            const trs = Array.from(doc.querySelectorAll('tr'));
+            return trs.filter(tr => {
+                const hasMagnet = tr.querySelector('a[href^="magnet:"]');
+                const hasDownload = Array.from(tr.querySelectorAll('a, input, button')).some(el =>
+                    (el.innerText?.includes('Download')) || el.value === 'Download'
+                );
+                return hasMagnet || hasDownload;
+            });
+        },
+
+        /**
+         * 获取结果表格容器 (用于追加新行)
+         */
+        getResultsTable() {
+            const table = this._findResultTable(document);
+            if (table) {
+                return table.querySelector('tbody') || table;
+            }
+            const firstRow = this.getResultRows()[0];
+            return firstRow ? firstRow.parentNode : null;
+        },
+
+        /**
+         * 获取当前 URL 的页码
+         */
+        getCurrentPageNum() {
+            const url = new URL(window.location.href);
+            const pathParts = url.pathname.split('/').filter(Boolean);
+            if (pathParts[0] === 'search' && pathParts[1]) {
+                return parseInt(pathParts[2]) || 1;
+            }
+            const activePageEl = document.querySelector('.pagination .active, .pagination strong, .pages .current');
+            if (activePageEl) {
+                const num = parseInt(activePageEl.innerText);
+                if (!isNaN(num)) return num;
+            }
+            return 1;
+        },
+
+        /**
+         * 构造指定页码的下一页 URL
+         */
+        getNextPageUrl(pageNum) {
+            const url = new URL(window.location.href);
+            const pathParts = url.pathname.split('/').filter(Boolean);
+            if (pathParts[0] === 'search' && pathParts[1]) {
+                return `${url.origin}/search/${pathParts[1]}/${pageNum}`;
+            }
+            const paginationLinks = document.querySelectorAll('.pagination a, .pages a');
+            for (let link of paginationLinks) {
+                const href = link.getAttribute('href');
+                // 采用精准的边界正则匹配，防止页码 /2 误匹配成 /20 (修复 #9)
+                const regex = new RegExp(`\\/${pageNum}(?:$|\\/|\\?|#)`);
+                if (href && regex.test(href)) {
+                    return new URL(href, window.location.origin).href;
+                }
+            }
+            return null;
+        },
+
+        /**
+         * 处理表格行：只做DOM标记，先凑齐再统一排队
          */
         processRows() {
-            const rows = document.querySelectorAll('tr');
+            const resultRows = this.getResultRows();
 
-            rows.forEach(row => {
+            resultRows.forEach(row => {
                 try {
-                    // 跳过已处理的行
-                    if (row.querySelector('.missav-btn, .javdb-btn')) return;
-
                     const rowText = row.innerText;
+                    
+                    // --- 检查是否包含排除关键字 ---
+                    const isExcluded = state.excludeKeywords.some(kw => kw && rowText.includes(kw));
+                    if (isExcluded) {
+                        row.style.display = 'none';
+                        row.dataset.excluded = 'true'; // 添加排除标记 (修复 #10)
+                        delete row.dataset.validCode; // 彻底切断该行参与排队的可能
+                        // 同时也从请求队列中移除已排队的当前行任务 (修复 #4)
+                        state.requestQueue = state.requestQueue.filter(task => task.row !== row);
+                        return;
+                    }
+                    
+                    // 恢复显示（先前因排除关键字被隐藏的行）(修复 #10)
+                    if (row.dataset.excluded === 'true') {
+                        row.style.display = '';
+                        delete row.dataset.excluded;
+                    }
+
+                    // 如果已经打上了标记，说明已经匹配过番号，直接跳过
+                    if (row.dataset.validCode) return;
                     const match = rowText.match(CONFIG.codeRegex);
 
                     if (match) {
@@ -1505,12 +2009,19 @@
                             // 找到字母和数字的分界点，插入连字符
                             code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
                         }
-                        this.enhanceRow(row, code);
+                        // 仅做标记，不立即处理和加入排队
+                        row.dataset.validCode = code;
+                    } else {
+                        // 如果不匹配番号正则，说明非JAV视频，直接隐藏
+                        row.style.display = 'none';
                     }
                 } catch (e) {
                     console.error('[TorrentKitty] 处理行时出错:', e, row);
                 }
             });
+
+            // 触发翻页与分发队列的检查逻辑
+            this.checkPaginationAndDispatch();
 
             // 美化原站按钮
             OriginalButtonStyler.style();
@@ -1535,51 +2046,71 @@
 
             // 创建 MissAV 按钮
             const missavBtn = ButtonFactory.createLinkButton(
-                'MissAV',
+                '▶ MISS_AV',
                 `https://missav.ws/cn/${code}`,
                 COLORS.pink,
                 'missav-btn'
             );
+            missavBtn.style.fontFamily = "'JetBrains Mono', sans-serif";
+            missavBtn.style.letterSpacing = "1px";
             parent.insertBefore(missavBtn, targetBtn.nextSibling);
 
             // 创建 JavDB 按钮
             const javdbBtn = ButtonFactory.createLinkButton(
-                '⏳ 加载中',
+                '⏳ DATALINK_INIT...',
                 '#',
                 COLORS.neutral,
                 'javdb-btn'
             );
+            javdbBtn.style.fontFamily = "'JetBrains Mono', sans-serif";
+            javdbBtn.style.letterSpacing = "1px";
             parent.insertBefore(javdbBtn, missavBtn.nextSibling);
 
             // 创建封面容器
             const coverContainer = document.createElement('div');
             coverContainer.className = 'javdb-cover-container';
             coverContainer.style.cssText = `
-                margin-top: 10px; 
-                font-size: 13px; 
-                color: #64748b;
-                font-family: 'Inter', 'Segoe UI', -apple-system, sans-serif;
-                padding: 12px 16px;
-                background: linear-gradient(145deg, rgba(102, 126, 234, 0.08), rgba(118, 75, 162, 0.05));
-                border-radius: 10px;
-                border: 1px solid rgba(102, 126, 234, 0.15);
+                margin-top: 12px; 
+                font-size: 12px; 
+                color: #94a3b8;
+                font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                padding: 14px 18px;
+                background: linear-gradient(145deg, rgba(15, 23, 42, 0.8), rgba(2, 6, 23, 0.9));
+                border-radius: 8px;
+                border: 1px solid rgba(6, 182, 212, 0.2);
                 display: inline-block;
+                box-shadow: 0 10px 20px rgba(0,0,0,0.5), inset 0 0 15px rgba(6, 182, 212, 0.05);
+                position: relative;
+                overflow: hidden;
             `;
+
+            // 添加扫描线特效元素
+            const scanline = document.createElement('div');
+            scanline.style.cssText = `
+                position: absolute;
+                top: 0; left: 0; right: 0;
+                height: 2px;
+                background: linear-gradient(90deg, transparent, rgba(6, 182, 212, 0.8), transparent);
+                animation: scan 2s linear infinite;
+                opacity: 0.5;
+            `;
+            
+            // 为了扫描线动画注入一条临时关键帧，放在 StyleUtils 更合适，但这里直接写也行，其实在全局样式加更稳妥。
+            // 这里我们依赖前面注入的 style，但为了确保生效可以内联一些简单的动画或者直接添加全局。
+            // 稍后可以补充这个 `@keyframes scan`。为求稳妥，我们在全局再加一次，或者不加这个扫描线而是用纯 CSS 发光。
+            // 简单处理，移除 scanline 动画，改用内部的霓虹脉冲发光
             coverContainer.innerHTML = `
-                <span style="display: inline-flex; align-items: center; gap: 8px;">
-                    <span style="display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(102, 126, 234, 0.3); border-top-color: #667eea; border-radius: 50%; animation: spin 1s linear infinite;"></span>
-                    <span>封面加载中...</span>
+                <span style="display: inline-flex; align-items: center; gap: 10px;">
+                    <span style="display: inline-block; width: 14px; height: 14px; border: 2px solid rgba(6, 182, 212, 0.2); border-top-color: #06b6d4; border-radius: 50%; animation: spin 1s linear infinite, neonPulse 2s infinite;"></span>
+                    <span style="color: #06b6d4; text-transform: uppercase; letter-spacing: 1px; text-shadow: 0 0 5px rgba(6, 182, 212, 0.5);">INITIALIZING DATALINK...</span>
                 </span>
             `;
             parent.appendChild(coverContainer);
 
-            // 注入旋转动画（如果未注入）
-            if (!document.getElementById('tk-spin-animation')) {
-                const spinStyle = document.createElement('style');
-                spinStyle.id = 'tk-spin-animation';
-                spinStyle.textContent = `@keyframes spin { to { transform: rotate(360deg); } }`;
-                document.head.appendChild(spinStyle);
-            }
+            // 移除 spin 动画的重复注入逻辑，已合并到 StyleUtils.injectGlobalStyles 中 (修复 #13)
+
+            // 标记该行已经完成了 enhance，防止重复加入队列
+            row.dataset.enhanced = 'true';
 
             // ⚡ 关键优化：先检查缓存，命中则直接显示，无需排队
             const cached = CacheManager.get(code);
@@ -1595,6 +2126,246 @@
         },
 
         /**
+         * 获取当前页面拥有的“具有有效番号的行数”
+         */
+        getValidRowsCount() {
+            return document.querySelectorAll('tr[data-valid-code]').length;
+        },
+
+        /**
+         * 显示底部加载状态横幅
+         */
+        showStatusBanner(text, showContinueBtn = false) {
+            if (state.bannerTimeout) {
+                clearTimeout(state.bannerTimeout);
+                state.bannerTimeout = null;
+            }
+
+            let banner = document.getElementById('tk-status-banner');
+            if (!banner) {
+                banner = document.createElement('div');
+                banner.id = 'tk-status-banner';
+                banner.style.cssText = `
+                    margin: 20px auto;
+                    padding: 15px 20px;
+                    max-width: 600px;
+                    background: linear-gradient(135deg, rgba(2, 6, 23, 0.95) 0%, rgba(15, 23, 42, 0.95) 100%);
+                    color: #06b6d4;
+                    border: 1px solid rgba(6, 182, 212, 0.4);
+                    border-radius: 8px;
+                    text-align: center;
+                    font-family: 'JetBrains Mono', 'Inter', sans-serif;
+                    font-weight: 700;
+                    font-size: 13px;
+                    box-shadow: 0 10px 25px rgba(0,0,0,0.8), 0 0 15px rgba(6, 182, 212, 0.2);
+                    backdrop-filter: blur(10px);
+                    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+                    z-index: 9998;
+                    text-transform: uppercase;
+                    letter-spacing: 1px;
+                `;
+                const resultsTable = this.getResultsTable();
+                if (resultsTable && resultsTable.parentNode) {
+                    resultsTable.parentNode.insertBefore(banner, resultsTable.nextSibling);
+                } else {
+                    document.body.appendChild(banner);
+                }
+            }
+
+            // 改为安全的文本写入，规避 XSS 风险 (优化 #14)
+            banner.innerHTML = '';
+            const textSpan = document.createElement('span');
+            textSpan.textContent = text;
+            textSpan.style.textShadow = '0 0 5px rgba(6, 182, 212, 0.5)';
+            banner.appendChild(textSpan);
+            
+            if (showContinueBtn) {
+                const btn = document.createElement('button');
+                btn.innerText = '>> PROCEED_NEXT';
+                btn.style.cssText = `
+                    margin-left: 15px;
+                    padding: 6px 14px;
+                    background: rgba(6, 182, 212, 0.1);
+                    border: 1px solid rgba(6, 182, 212, 0.5);
+                    border-radius: 4px;
+                    color: #06b6d4;
+                    cursor: pointer;
+                    font-size: 12px;
+                    font-weight: bold;
+                    font-family: 'JetBrains Mono', sans-serif;
+                    box-shadow: inset 0 0 10px rgba(6, 182, 212, 0.1);
+                    transition: all 0.2s;
+                `;
+                btn.onmouseover = () => {
+                    btn.style.background = 'rgba(6, 182, 212, 0.2)';
+                    btn.style.boxShadow = '0 0 10px rgba(6, 182, 212, 0.4), inset 0 0 10px rgba(6, 182, 212, 0.2)';
+                    btn.style.color = '#fff';
+                };
+                btn.onmouseout = () => {
+                    btn.style.background = 'rgba(6, 182, 212, 0.1)';
+                    btn.style.boxShadow = 'inset 0 0 10px rgba(6, 182, 212, 0.1)';
+                    btn.style.color = '#06b6d4';
+                };
+                btn.onclick = () => {
+                    state.targetValidCount += 8;
+                    this.showStatusBanner('INITIATING_SEARCH...', false);
+                    this.checkPaginationAndDispatch();
+                };
+                banner.appendChild(btn);
+            }
+
+            banner.style.display = 'block';
+            banner.style.opacity = '1';
+        },
+
+        /**
+         * 隐藏加载状态横幅
+         */
+        hideStatusBanner(delay = 0) {
+            if (state.bannerTimeout) {
+                clearTimeout(state.bannerTimeout);
+                state.bannerTimeout = null;
+            }
+            if (delay > 0) {
+                state.bannerTimeout = setTimeout(() => this.hideStatusBanner(0), delay);
+                return;
+            }
+            const banner = document.getElementById('tk-status-banner');
+            if (banner) {
+                banner.style.opacity = '0';
+                state.bannerTimeout = setTimeout(() => {
+                    banner.style.display = 'none';
+                }, 300);
+            }
+        },
+
+        /**
+         * 检查翻页是否足够，如果够了就分发队列
+         */
+        checkPaginationAndDispatch() {
+            // 如果正在请求下一页 HTML 阶段，防抖返回
+            if (state.isFetchingPage) return;
+
+            const validCount = this.getValidRowsCount();
+            console.log(`[TorrentKitty] 页面当前带有番号的项目: ${validCount}/${state.targetValidCount}`);
+
+            if (validCount < state.targetValidCount) {
+                if (state.fetchPageNum - state.currentPageNum >= (CONFIG.maxPagesToFetch || 10)) {
+                    console.log('[TorrentKitty] 已达到最大翻页限制，停止寻找。');
+                    this.showStatusBanner(`已到达最大页数限制。当前带番号的项目: ${validCount} 个`, true);
+                    this.dispatchQueue();
+                    return;
+                }
+                
+                state.fetchPageNum++;
+                this.loadNextPage(state.fetchPageNum);
+            } else {
+                console.log('[TorrentKitty] 已收集到足够的番号项目，开始排队获取详情...');
+                this.showStatusBanner(`当前共有 ${validCount} 个带番号的项目，正在排队加载封面...`, true);
+                this.dispatchQueue();
+            }
+        },
+
+        /**
+         * 统一对收集到的行派发 `enhanceRow` 任务加入队列
+         */
+        dispatchQueue() {
+            const validRows = document.querySelectorAll('tr[data-valid-code]:not([data-enhanced="true"])');
+            validRows.forEach(row => {
+                const code = row.dataset.validCode;
+                if (code) {
+                    this.enhanceRow(row, code);
+                }
+            });
+        },
+
+        /**
+         * 拉取并拼接下一页
+         */
+        loadNextPage(pageNum) {
+            const nextUrl = this.getNextPageUrl(pageNum);
+            if (!nextUrl) {
+                console.log('[TorrentKitty] 无法构造下一页 URL，停止加载。');
+                this.showStatusBanner(`已到达最后一页或无法获取下一页。当前带有番号的项目: ${this.getValidRowsCount()} 个`, true);
+                this.dispatchQueue();
+                return;
+            }
+
+            this.showStatusBanner(`正在加载第 ${pageNum} 页以补充项目... (当前带有番号的项目: ${this.getValidRowsCount()}/${state.targetValidCount})`);
+            state.isFetchingPage = true;
+
+            gmFetch(nextUrl).then(response => {
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                return response.text();
+            }).then(html => {
+                const parser = new DOMParser();
+                const doc = parser.parseFromString(html, 'text/html');
+                const nextRows = this.getResultRows(doc);
+                
+                const resultsTable = this.getResultsTable();
+                if (!resultsTable) {
+                    console.error('[TorrentKitty] 未找到结果表格容器');
+                    state.isFetchingPage = false; // 异常退出前重置状态 (修复 #17)
+                    return;
+                }
+
+                let lastValidRow = null;
+                nextRows.forEach(row => {
+                    const rowText = row.innerText;
+                    if (rowText.match(CONFIG.codeRegex)) {
+                        // 提前对包含排除关键字的行进行拦截 (修复 #5)
+                        const isExcluded = state.excludeKeywords.some(kw => kw && rowText.includes(kw));
+                        if (isExcluded) {
+                            return; // 直接跳过，不插入 DOM
+                        }
+                        const importedRow = document.importNode(row, true);
+                        resultsTable.appendChild(importedRow);
+                        lastValidRow = importedRow;
+                    }
+                });
+
+                // --- 插入页码标记（直接追加在最后一个条目的名称旁边） ---
+                if (lastValidRow) {
+                    const nameCell = lastValidRow.querySelector('.name') || lastValidRow.cells[0];
+                    if (nameCell) {
+                        const badge = document.createElement('span');
+                        badge.className = 'tk-page-marker'; // 添加特定的类名以便 Observer 过滤 (修复 #7)
+                        badge.style.cssText = 'margin-left: 10px; padding: 2px 8px; background: rgba(236, 72, 153, 0.15); color: #ec4899; border-radius: 4px; font-size: 11px; font-weight: bold; border: 1px solid rgba(236, 72, 153, 0.4); text-shadow: 0 0 5px rgba(236, 72, 153, 0.5); font-family: "JetBrains Mono", sans-serif;';
+                        badge.innerText = `[PAGE_${pageNum}]`;
+                        nameCell.appendChild(badge);
+                    }
+                }
+                // --------------------
+
+                state.isFetchingPage = false;
+                let addedAny = !!lastValidRow;
+                if (!addedAny) {
+                    console.log(`[TorrentKitty] 第 ${pageNum} 页未找到任何可能的番号项目。`);
+                    state.consecutiveEmptyPages++;
+                    if (state.consecutiveEmptyPages > 5) {
+                        this.showStatusBanner('连续 5 页未找到任何带番号项目，停止自动加载。', true);
+                        this.dispatchQueue();
+                        return;
+                    }
+                    // 继续下一页
+                    setTimeout(() => this.checkPaginationAndDispatch(), 1000);
+                } else {
+                    state.consecutiveEmptyPages = 0;
+                    // 通过调用 processRows 手动触发一次
+                    this.processRows();
+                }
+            }).catch(error => {
+                state.isFetchingPage = false;
+                console.error('[TorrentKitty] 加载下一页失败:', error);
+                this.showStatusBanner(`加载第 ${pageNum} 页失败，将在 3 秒后重试...`);
+                setTimeout(() => {
+                    state.fetchPageNum--; // 回退以便重试
+                    this.checkPaginationAndDispatch();
+                }, 3000);
+            });
+        },
+
+        /**
          * 初始化
          */
         init() {
@@ -1607,15 +2378,21 @@
             // 初始化缓存 (从 GM 存储加载)
             CacheManager.init();
 
+            // 初始化页码记录
+            state.currentPageNum = this.getCurrentPageNum();
+            state.fetchPageNum = state.currentPageNum;
+
             // 输出版本信息
             console.log(
-                `%c✨ TorrentKitty Enhanced v${VERSION} %c已加载`,
-                'background: linear-gradient(135deg, #667eea, #764ba2); color: white; padding: 4px 8px; border-radius: 4px 0 0 4px; font-weight: bold;',
-                'background: #38ef7d; color: #1e293b; padding: 4px 8px; border-radius: 0 4px 4px 0; font-weight: bold;'
+                `%c [TK_ENHANCED] %c VER_${VERSION} %c SYSTEM_ONLINE `,
+                'background: #ec4899; color: #fff; font-weight: bold; border-radius: 4px 0 0 4px; padding: 2px 0;',
+                'background: #0f172a; color: #06b6d4; border: 1px solid #06b6d4; border-left: none; border-right: none; padding: 1px 4px; font-family: monospace;',
+                'background: #06b6d4; color: #fff; font-weight: bold; border-radius: 0 4px 4px 0; padding: 2px 0; text-shadow: 0 0 5px rgba(255,255,255,0.5);'
             );
 
             // 页面加载完成后执行（保存引用以便 cleanup 时移除）
             state.loadHandler = () => {
+                ExclusionManager.init();
                 this.processRows();
                 ButtonFactory.createSettingsButton();
             };
@@ -1624,12 +2401,15 @@
             // 使用 MutationObserver 监听 DOM 变化（替代 setInterval 轮询）
             let debounceTimer = null;
             state.observer = new MutationObserver((mutations) => {
-                // 过滤掉脚本自身的 DOM 修改，避免死循环
+                // 过滤掉脚本自身的 DOM 修改，避免死循环 (修复 #7 - 补全状态横幅、排除面板和页码标记的拦截)
                 const hasRelevantChanges = mutations.some(m =>
                     !m.target.closest?.('.javdb-cover-container') &&
                     !m.target.closest?.('.javdb-btn') &&
                     !m.target.closest?.('.missav-btn') &&
                     !m.target.closest?.('.tk-settings-fab') &&
+                    !m.target.closest?.('#tk-status-banner') &&
+                    !m.target.closest?.('#tk-exclusion-panel') &&
+                    !m.target.closest?.('.tk-page-marker') &&
                     !m.target.classList?.contains('tk-styled')
                 );
                 if (hasRelevantChanges) {
