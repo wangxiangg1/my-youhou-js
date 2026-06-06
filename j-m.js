@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      6.1.0
+// @version      6.1.1
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -31,7 +31,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 版本号（与 @version 保持一致）
-        version: '6.1.0',
+        version: '6.1.1',
         // 正常缓存过期时间 (7天)
         cacheExpiry: 7 * 24 * 60 * 60 * 1000,
         // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
@@ -62,6 +62,8 @@
 
     // ==================== 样式工具 ====================
     const StyleUtils = {
+        _iconTemplates: {}, // 缓存预解析的 SVG DOM
+
         /**
          * 注入全局 CSS
          */
@@ -217,7 +219,7 @@
         },
 
         /**
-         * 安全设置按钮内容（以 DOMParser 载入 SVG 并安全插入）
+         * 安全设置按钮内容（使用缓存的 SVG Template）
          */
         _setButtonContent(btn, text, iconKey, isLoading) {
             btn.textContent = '';
@@ -226,13 +228,12 @@
             const iconSvg = ICONS[activeIconKey];
             
             if (iconSvg) {
-                const parser = new DOMParser();
-                const doc = parser.parseFromString(iconSvg, 'text/html');
-                const svg = doc.querySelector('svg');
-                if (svg) {
-                    const importedSvg = document.importNode(svg, true);
-                    btn.appendChild(importedSvg);
+                if (!this._iconTemplates[activeIconKey]) {
+                    const template = document.createElement('template');
+                    template.innerHTML = iconSvg.trim();
+                    this._iconTemplates[activeIconKey] = template.content.firstChild;
                 }
+                btn.appendChild(this._iconTemplates[activeIconKey].cloneNode(true));
             }
 
             const textSpan = document.createElement('span');
@@ -344,6 +345,12 @@
         cleanup() {
             try {
                 if (typeof GM_listValues === 'undefined') return;
+                
+                const lastCleanup = GM_getValue('last_cleanup_date', 0);
+                // 每天最多全量清理一次
+                if (Date.now() - lastCleanup < 24 * 60 * 60 * 1000) return;
+                GM_setValue('last_cleanup_date', Date.now());
+
                 const keys = GM_listValues();
                 let deletedCount = 0;
                 for (const key of keys) {
@@ -387,10 +394,8 @@
 
             if (!rawCode) return null;
 
-            // 精确提取番号部分，排除后面的纯字母后缀（如 -chinese-subtitle, -uncensored）
-            // 支持格式：SNOS-059, FC2-PPV-1234567, n1234, ABC123
-            // 规则：匹配到最后一个数字为止，之后的 -纯字母 后缀被排除
-            const codeMatch = rawCode.match(/^(.*\d)(?:-[a-zA-Z].*)?$/i);
+            // 精确提取番号部分，截取到最后一个数字为止（兼容 -中文字幕, -4k 等非纯字母后缀）
+            const codeMatch = rawCode.match(/^(.*?\d+)/i);
             if (codeMatch) {
                 return codeMatch[1].toUpperCase();
             }
@@ -427,10 +432,8 @@
             const match = path.match(/\/videos\/([^\/]+)/);
             if (match && match[1]) {
                 const rawCode = match[1];
-                // 精确提取番号部分，排除后面的纯字母后缀（如 -chinese-subtitle, -uncensored）
-                // 支持格式：SNOS-059, FC2-PPV-1234567, n1234, ABC123
-                // 规则：匹配到最后一个数字为止，之后的 -纯字母 后缀被排除
-                const codeMatch = rawCode.match(/^(.*\d)(?:-[a-zA-Z].*)?$/i);
+                // 精确提取番号部分，截取到最后一个数字为止（兼容非纯字母后缀）
+                const codeMatch = rawCode.match(/^(.*?\d+)/i);
                 if (codeMatch) {
                     return codeMatch[1].toUpperCase();
                 }
@@ -473,14 +476,27 @@
                         const parser = new DOMParser();
                         const doc = parser.parseFromString(response.responseText, 'text/html');
 
+                        // 检查是否遭遇 Cloudflare 5秒盾等异常拦截（页面无关键元素且非正常搜索结果页）
+                        if (!doc.querySelector('.movie-list') && !doc.title.includes('JavDB')) {
+                            console.warn('[Bridge] JavDB 返回内容异常，可能触发了 Cloudflare 拦截');
+                            callback({ success: false, error: '安全拦截或页面异常' });
+                            return;
+                        }
+
                         const firstResult = doc.querySelector('.movie-list a.box');
 
                         if (firstResult) {
-                            // 校验搜索结果的番号是否与查询番号精确匹配
+                            // 校验搜索结果的番号是否与查询番号精确匹配 (防止短番号错误匹配长番号)
                             const resultTitle = firstResult.querySelector('.video-title strong, strong');
                             const resultCode = resultTitle ? resultTitle.textContent.trim().toUpperCase() : '';
 
-                            if (resultCode.includes(code.toUpperCase())) {
+                            const regex = new RegExp(`\\b${code.toUpperCase()}\\b`, 'i');
+                            
+                            // 考虑某些特殊格式去标点后全等
+                            const pureResult = resultCode.replace(/[^A-Z0-9]/ig, '');
+                            const pureCode = code.toUpperCase().replace(/[^A-Z0-9]/ig, '');
+
+                            if (regex.test(resultCode) || pureResult === pureCode) {
                                 const href = firstResult.getAttribute('href');
                                 const realUrl = `${CONFIG.javdbBaseUrl}${href}`;
 
@@ -667,33 +683,32 @@
 
             console.log(`[Bridge] Jable: 提取到番号 ${code}，正在查找标题元素...`);
 
-            // 方法1: 通过番号搜索包含它的标题元素
-            const allHeadings = document.querySelectorAll('h1, h2, h3, h4, h5');
+            // 方法1: 优先尝试常见的标题精确选择器
             let titleElement = null;
+            const selectors = [
+                '.header-left h4',
+                '.video-info h1',
+                '.video-detail h1',
+                '.video-title',
+                '.header-right h4'
+            ];
 
-            for (const heading of allHeadings) {
-                // 检查元素的文本内容是否包含番号（大小写不敏感）
-                if (heading.textContent && heading.textContent.toUpperCase().includes(code)) {
-                    titleElement = heading;
-                    console.log(`[Bridge] Jable: 通过番号找到标题元素 (${heading.tagName})`);
+            for (const selector of selectors) {
+                const el = document.querySelector(selector);
+                if (el && el.textContent.trim().toUpperCase().includes(code)) {
+                    titleElement = el;
+                    console.log(`[Bridge] Jable: 通过精确选择器找到标题元素 (${selector})`);
                     break;
                 }
             }
 
-            // 方法2: 如果没找到，尝试常见的标题选择器
+            // 方法2: 如果没找到，退级遍历所有 Heading
             if (!titleElement) {
-                const selectors = [
-                    '.video-info h1',
-                    '.video-detail h1',
-                    '.video-title',
-                    'h1'
-                ];
-
-                for (const selector of selectors) {
-                    const el = document.querySelector(selector);
-                    if (el && el.textContent.trim()) {
-                        titleElement = el;
-                        console.log(`[Bridge] Jable: 通过选择器找到标题元素 (${selector})`);
+                const allHeadings = document.querySelectorAll('h1, h2, h3, h4, h5');
+                for (const heading of allHeadings) {
+                    if (heading.textContent && heading.textContent.toUpperCase().includes(code)) {
+                        titleElement = heading;
+                        console.log(`[Bridge] Jable: 通过遍历标题找到元素 (${heading.tagName})`);
                         break;
                     }
                 }
@@ -880,8 +895,11 @@
             if (currentUrl.includes('javdb.com')) {
                 PageHandler.handleJavDB();
             } else if (window.location.hostname.includes('missav')) {
-                // 记录当前 MissAV 域名偏好
-                GM_setValue('missav_origin', window.location.origin);
+                // 记录当前 MissAV 域名偏好 (减少无用 I/O)
+                const currentOrigin = window.location.origin;
+                if (GM_getValue('missav_origin') !== currentOrigin) {
+                    GM_setValue('missav_origin', currentOrigin);
+                }
                 PageHandler.handleMissAV();
             } else if (currentUrl.includes('jable.tv')) {
                 PageHandler.handleJable();
@@ -889,26 +907,40 @@
         },
 
         /**
-         * 监听单页应用(SPA)的动态页面变化
+         * 监听单页应用(SPA)的动态页面变化 (使用 History API)
          */
         _setupSpaObserver() {
             let lastUrl = window.location.href;
-            
-            const observer = new MutationObserver(() => {
+
+            const checkUrlChange = () => {
                 if (window.location.href !== lastUrl) {
                     lastUrl = window.location.href;
                     console.log(`[Bridge] SPA 路由变化检测到: ${lastUrl}`);
                     setTimeout(() => this.route(), 500); // 延迟执行等待 DOM 渲染
-                } else if (!document.querySelector('.bridge-action-container')) {
-                    // 如果 URL 没变，但按钮消失了（可能是局部刷新重绘），尝试防抖再次注入
-                    if (window.location.hostname.includes('missav') || window.location.href.includes('jable.tv')) {
-                        clearTimeout(this._spaTimeout);
-                        this._spaTimeout = setTimeout(() => this.route(), 1000);
-                    }
                 }
-            });
+            };
 
-            observer.observe(document.body, { childList: true, subtree: true });
+            // 拦截 pushState 和 replaceState
+            const originalPushState = history.pushState;
+            history.pushState = function() {
+                originalPushState.apply(this, arguments);
+                checkUrlChange();
+            };
+
+            const originalReplaceState = history.replaceState;
+            history.replaceState = function() {
+                originalReplaceState.apply(this, arguments);
+                checkUrlChange();
+            };
+
+            window.addEventListener('popstate', checkUrlChange);
+
+            // 低频轮询：针对局部刷新导致的按钮消失，使用 setInterval 替代高频的 MutationObserver
+            setInterval(() => {
+                if (!document.querySelector('.bridge-action-container')) {
+                    this.route();
+                }
+            }, 2000);
         }
     };
 
