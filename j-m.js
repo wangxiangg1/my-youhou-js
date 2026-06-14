@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      6.1.2
+// @version      6.1.3
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -31,7 +31,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 版本号（与 @version 保持一致）
-        version: '6.1.2',
+        version: '6.1.3',
         // 正常缓存过期时间 (7天)
         cacheExpiry: 7 * 24 * 60 * 60 * 1000,
         // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
@@ -394,7 +394,7 @@
 
             if (!rawCode) return null;
 
-            // 精确提取番号部分，截取到最后一个数字为止（兼容 -中文字幕, -4k 等非纯字母后缀）
+            // 精确提取番号部分，截取到第一段连续数字为止（如 ssis-123-chinese-subtitle → SSIS-123，兼容 -中文字幕、-4k 等后缀）
             const codeMatch = rawCode.match(/^(.*?\d+)/i);
             if (codeMatch) {
                 return codeMatch[1].toUpperCase();
@@ -454,7 +454,7 @@
             const match = path.match(/\/videos\/([^\/]+)/);
             if (match && match[1]) {
                 const rawCode = match[1];
-                // 精确提取番号部分，截取到最后一个数字为止（兼容非纯字母后缀）
+                // 精确提取番号部分，截取到第一段连续数字为止（兼容非纯字母后缀）
                 const codeMatch = rawCode.match(/^(.*?\d+)/i);
                 if (codeMatch) {
                     return codeMatch[1].toUpperCase();
@@ -958,7 +958,9 @@
             window.addEventListener('popstate', checkUrlChange);
 
             // 低频轮询：针对局部刷新导致的按钮消失，使用 setInterval 替代高频的 MutationObserver
+            // 页面不可见（切到后台 / 其他标签页）时跳过，避免无意义的 DOM 查询开销
             setInterval(() => {
+                if (document.hidden) return;
                 if (!document.querySelector('.bridge-action-container')) {
                     this.route();
                 }
