@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.4
+// @version      4.5
 // @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -71,13 +71,13 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.4';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.5';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
         defaults: {
             coverWidth: 280,
-            coverHeight: 210,
+            // coverHeight 已由 CSS aspect-ratio: 4/3 控制，此处不再保留死配置
             pageMaxWidth: 1200,
             maxPagesToFetch: 10
         },
@@ -518,6 +518,17 @@
                     color: #fff;
                 }
 
+                /* 复制磁力按钮（与下载按钮配色统一，语义独立） */
+                .tk-btn-magnet {
+                    background: rgba(139, 157, 131, 0.15); /* sage 鼠尾草 */
+                    color: var(--tk-moss);
+                    border-color: rgba(139, 157, 131, 0.3);
+                }
+                .tk-btn-magnet:hover {
+                    background: var(--tk-sage);
+                    color: #fff;
+                }
+
                 .tk-btn-missav {
                     background: rgba(198, 107, 61, 0.12); /* terracotta 赭石 */
                     color: var(--tk-loss-red);
@@ -865,13 +876,21 @@
                 if (orderData) {
                     const parsed = typeof orderData === 'string' ? JSON.parse(orderData) : orderData;
                     const now = Date.now();
+
+                    // 先分离过期与未过期项，再统一删除过期项，
+                    // 避免把 GM_deleteValue 这种副作用塞进 Array.filter 谓词里
+                    const expired = [];
                     state.cacheOrder = parsed.filter(item => {
-                        if (now - item.timestamp < this.EXPIRY_TIME) {
-                            return true;
-                        }
-                        GM_deleteValue(this.STORAGE_KEY + '_' + item.code);
-                        return false;
+                        const isExpired = (now - item.timestamp) >= this.EXPIRY_TIME;
+                        if (isExpired) expired.push(item);
+                        return !isExpired;
                     });
+                    expired.forEach(item => GM_deleteValue(this.STORAGE_KEY + '_' + item.code));
+                    // init 删除过期项后，立即把精简后的 cacheOrder 落盘一次
+                    if (expired.length > 0) {
+                        this._orderDirty = true;
+                        this._persistOrder();
+                    }
                 } else {
                     state.cacheOrder = [];
                 }
@@ -950,9 +969,13 @@
                 state.cacheOrder.splice(index, 1);
             }
             state.cacheOrder.push({ code, timestamp: now });
+            // 仅标记脏，真正写盘交给 _persistOrder（节流），避免每次 get/set 都全量序列化
+            this._orderDirty = true;
         },
 
         _persistOrder() {
+            if (!this._orderDirty) return;
+            this._orderDirty = false;
             try {
                 GM_setValue(this.ORDER_KEY, state.cacheOrder);
             } catch (e) {
@@ -974,6 +997,7 @@
                     GM_deleteValue(this.STORAGE_KEY + '_' + oldest.code);
                 }
             }
+            this._orderDirty = true;
             this._persistOrder();
         },
 
@@ -981,15 +1005,20 @@
             delete state.javdbCache[code];
             state.cacheOrder = state.cacheOrder.filter(item => item.code !== code);
             GM_deleteValue(this.STORAGE_KEY + '_' + code);
+            this._orderDirty = true;
             this._persistOrder();
         }
     };
 
     // ==================== 条目缓存管理器 (缓存翻页获取到的条目) ====================
     const EntryCacheManager = {
+        STORAGE_PREFIX: 'tk_entry_cache_',
+        MAX_ENTRIES: 20,        // 最多保留 20 份不同搜索结果
+        EXPIRY_TIME: 60 * 60 * 1000, // 单份有效期 1 小时
+
         getKey() {
             const url = new URL(window.location.href);
-            return 'tk_entry_cache_' + url.origin + url.pathname + url.search;
+            return this.STORAGE_PREFIX + url.origin + url.pathname + url.search;
         },
 
         save(validParsedData, fetchPageNum) {
@@ -1024,8 +1053,7 @@
                 if (!cachedStr) return null;
 
                 const cacheObj = typeof cachedStr === 'string' ? JSON.parse(cachedStr) : cachedStr;
-                const expiry = 60 * 60 * 1000; // 缓存有效期 1 小时
-                if (Date.now() - cacheObj.timestamp > expiry) {
+                if (Date.now() - cacheObj.timestamp > this.EXPIRY_TIME) {
                     GM_deleteValue(this.getKey());
                     return null;
                 }
@@ -1033,6 +1061,57 @@
             } catch (e) {
                 console.error('[TorrentKitty] 读取条目缓存失败:', e);
                 return null;
+            }
+        },
+
+        /**
+         * 启动时清理：删除过期 + 超出上限的陈旧条目缓存。
+         * 避免 tk_entry_cache_* key 永久堆积导致 GM 存储膨胀。
+         */
+        cleanupStale() {
+            if (typeof GM_listValues !== 'function') return;
+            try {
+                const now = Date.now();
+                const all = GM_listValues()
+                    .filter(key => key.startsWith(this.STORAGE_PREFIX))
+                    .map(key => {
+                        const raw = GM_getValue(key, null);
+                        if (!raw) return null;
+                        try {
+                            const obj = typeof raw === 'string' ? JSON.parse(raw) : raw;
+                            return { key, timestamp: obj.timestamp || 0 };
+                        } catch (e) {
+                            return { key, timestamp: 0, corrupt: true };
+                        }
+                    })
+                    .filter(Boolean);
+
+                // 1) 先删过期与损坏的
+                let deletedCount = 0;
+                for (const item of all) {
+                    if (item.corrupt || (now - item.timestamp) > this.EXPIRY_TIME) {
+                        GM_deleteValue(item.key);
+                        deletedCount++;
+                    }
+                }
+
+                // 2) 未过期的按时间倒序，超出上限的最旧条目删掉
+                const live = all
+                    .filter(item => !item.corrupt && (now - item.timestamp) <= this.EXPIRY_TIME)
+                    .sort((a, b) => b.timestamp - a.timestamp);
+
+                if (live.length > this.MAX_ENTRIES) {
+                    for (let i = this.MAX_ENTRIES; i < live.length; i++) {
+                        GM_deleteValue(live[i].key);
+                        deletedCount++;
+                    }
+                }
+
+                if (deletedCount > 0) {
+                    console.log(`[TorrentKitty] 条目缓存清理完成，共删除 ${deletedCount} 条陈旧数据`);
+                }
+            } catch (e) {
+                console.error('[TorrentKitty] 条目缓存清理失败:', e);
             }
         }
     };
@@ -1159,7 +1238,7 @@
                     throw new Error('CAPTCHA_DETECTED');
                 }
 
-                const result = this.parseSearchResult(html);
+                const result = this.parseSearchResult(html, code);
 
                 if (result) {
                     debugInfo.foundResult = true;
@@ -1207,12 +1286,31 @@
             };
         },
 
-        parseSearchResult(html) {
+        parseSearchResult(html, expectedCode) {
             const parser = new DOMParser();
             const doc = parser.parseFromString(html, 'text/html');
             const firstResult = doc.querySelector('.movie-list a.box');
             if (firstResult?.getAttribute('href')) {
                 const href = firstResult.getAttribute('href');
+
+                // 校验搜索结果番号是否与期望番号匹配，防止短番号误命中长番号
+                if (expectedCode) {
+                    const resultTitle = firstResult.querySelector('.video-title strong, strong');
+                    const resultCode = resultTitle ? resultTitle.textContent.trim().toUpperCase() : '';
+
+                    // 去除标点后做全等比对（兼容 AAA-123 与 AAA123 写法）
+                    const pureResult = resultCode.replace(/[^A-Z0-9]/ig, '');
+                    const pureExpected = expectedCode.toUpperCase().replace(/[^A-Z0-9]/ig, '');
+
+                    // 番号不匹配则当作未找到，避免错误命中
+                    if (pureResult && pureExpected && pureResult !== pureExpected) {
+                        const regex = new RegExp(`\\b${expectedCode.toUpperCase()}\\b`, 'i');
+                        if (!regex.test(resultCode)) {
+                            return null;
+                        }
+                    }
+                }
+
                 return {
                     url: 'https://javdb.com' + href,
                     coverId: href.split('/').pop()
@@ -1451,9 +1549,9 @@
                     <div class="tk-card-title" title="${data.title}">${data.title}</div>
                     <div class="tk-card-meta" style="margin-top: -4px;">📅 ${data.date}</div>
                     <div class="tk-card-actions">
-                        <span class="tk-btn-modern tk-btn-download" id="${cardId}-magnet-btn" onclick="event.stopPropagation();">🧲 复制磁力</span>
-                        <a href="https://missav.ws/cn/${data.code}" target="_blank" class="tk-btn-modern tk-btn-missav" onclick="event.stopPropagation();">▶ MissAV</a>
-                        <a href="#" target="_blank" class="tk-btn-modern tk-btn-javdb disabled" id="${cardId}-javdb-btn" onclick="event.stopPropagation(); return false;">🔗 JavDB</a>
+                        <span class="tk-btn-modern tk-btn-magnet" id="${cardId}-magnet-btn">🧲 复制磁力</span>
+                        <a href="https://missav.ws/cn/${data.code}" target="_blank" class="tk-btn-modern tk-btn-missav">▶ MissAV</a>
+                        <a href="#" target="_blank" class="tk-btn-modern tk-btn-javdb disabled" id="${cardId}-javdb-btn">🔗 JavDB</a>
                     </div>
                 </div>
             `;
@@ -1487,6 +1585,22 @@
                         alert('未获取到磁力链接！');
                     }
                 };
+            }
+
+            // MissAV / JavDB 按钮：点击不应触发卡片整体的抽屉点击事件
+            const missavAnchor = card.querySelector('.tk-btn-missav');
+            if (missavAnchor) {
+                missavAnchor.addEventListener('click', (e) => e.stopPropagation());
+            }
+            // JavDB 按钮初始为 disabled，stopPropagation 在此处兜底；URL/状态由 UIUpdater 接管
+            const javdbAnchor = card.querySelector(`#${cardId}-javdb-btn`);
+            if (javdbAnchor) {
+                javdbAnchor.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (javdbAnchor.classList.contains('disabled')) {
+                        e.preventDefault();
+                    }
+                });
             }
 
             return card;
@@ -1536,19 +1650,23 @@
                         const coverUrl = JavDBService.getCoverUrl(coverId);
                         img.src = coverUrl;
                         img.onload = () => {
+                            debugInfo.imageLoadSuccess = true;
                             img.classList.add('loaded');
                             skeleton.style.display = 'none';
                         };
                         img.onerror = () => {
+                            // 用 URL 编码明文 SVG 作占位图，避免 base64 中文字符损坏
+                            debugInfo.imageLoadSuccess = false;
                             img.onerror = null;
-                            img.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjRDRCODUiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzlCM0IyQSIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPlvlm77niYflu4常1TwvdGV4dD48L3N2Zz4=';
+                            img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%239B3B2A' text-anchor='middle' dy='.3em'%3E%E5%9B%BE%E5%8A%A0%E8%BD%BD%E5%A4%B1%E8%B4%A5%3C/text%3E%3C/svg%3E";
                             img.classList.add('loaded');
                             skeleton.style.display = 'none';
                             if (fallback) fallback.style.display = 'block';
                         };
                     } else {
                         // 未收录
-                        img.src = 'data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSIxMDAiIGhlaWdodD0iMTUwIj48cmVjdCB3aWR0aD0iMTAwJSIgaGVpZ2h0PSIxMDAlIiBmaWxsPSIjRDRCODUiLz48dGV4dCB4PSI1MCUiIHk9IjUwJSIgZm9udC1mYW1pbHk9Im1vbm9zcGFjZSIgZm9udC1zaXplPSIxMiIgZmlsbD0iIzNEMzIyNiIgdGV4dC1hbmNob3I9Im1pZGRsZSIgZHk9Ii4zZW0iPlvmnqOaUtuW9eV08vdGV4dD48L3N2Zz4=';
+                        img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%233D3226' text-anchor='middle' dy='.3em'%3E%E6%9C%AA%E6%94%B6%E5%BD%95%3C/text%3E%3C/svg%3E";
+                        debugInfo.imageLoadSuccess = false;
                         img.classList.add('loaded');
                         skeleton.style.display = 'none';
                     }
@@ -1602,7 +1720,7 @@
             btn.innerText = text;
             btn.className = 'tk-toolbar-btn';
             btn.style.margin = '0 0 0 8px';
-            btn.onclick = onClick;
+            if (onClick) btn.onclick = onClick;
             return btn;
         },
 
@@ -1637,7 +1755,7 @@
             const buttonContainer = document.createElement('div');
             buttonContainer.style.cssText = 'margin-top: 16px; display: flex; justify-content: flex-end;';
 
-            const closeBtn = this.createButton('关闭', COLORS.neutral, null);
+            const closeBtn = this.createButton('关闭', COLORS.neutral);
             buttonContainer.appendChild(closeBtn);
 
             modal.append(title, textarea, buttonContainer);
@@ -1934,6 +2052,7 @@
 
             const resultRows = this.getResultRows();
             const validParsedData = [];
+            const hadProcessedBefore = state.hadProcessedRows === true;
 
             resultRows.forEach(row => {
                 try {
@@ -2011,6 +2130,13 @@
 
             // 保存条目列表缓存
             EntryCacheManager.save(validParsedData, state.fetchPageNum);
+
+            // #5 优化：首次解析完已知行后，立刻派发一次队列，
+            // 让现有番号的封面请求与后续翻页并行进行，避免翻页期间界面一直空白。
+            if (!hadProcessedBefore) {
+                state.hadProcessedRows = true;
+                this.dispatchQueue();
+            }
 
             this.checkPaginationAndDispatch();
         },
@@ -2240,6 +2366,7 @@
             StyleUtils.injectGlobalStyles();
             SettingsManager.load();
             CacheManager.init();
+            EntryCacheManager.cleanupStale();
 
             state.currentPageNum = this.getCurrentPageNum();
             state.fetchPageNum = state.currentPageNum;
@@ -2294,7 +2421,10 @@
 
             let debounceTimer = null;
             state.observer = new MutationObserver((mutations) => {
+                // 只关心元素节点(target 是文本节点时 closest 为 undefined，
+                // 旧实现会把任何文本变化误判为 relevant，触发不必要的 processRows)
                 const hasRelevantChanges = mutations.some(m =>
+                    m.target.nodeType === 1 &&
                     !m.target.closest?.('.tk-main-container') &&
                     !m.target.closest?.('.tk-detail-drawer') &&
                     !m.target.closest?.('.tk-drawer-overlay')
