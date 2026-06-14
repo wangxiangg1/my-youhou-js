@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         JavDB & MissAV & Jable Bridge (完美直达版)
 // @namespace    http://tampermonkey.net/
-// @version      6.1.1
+// @version      6.1.2
 // @description  在 JavDB、MissAV、Jable 之间互相跳转；现代化UI、玻璃拟态风格、智能缓存
 // @author       Gemini
 // @match        https://javdb.com/v/*
@@ -31,7 +31,7 @@
     // ==================== 配置常量 ====================
     const CONFIG = {
         // 版本号（与 @version 保持一致）
-        version: '6.1.1',
+        version: '6.1.2',
         // 正常缓存过期时间 (7天)
         cacheExpiry: 7 * 24 * 60 * 60 * 1000,
         // 负缓存过期时间 (24小时) - 用于"搜索无结果"的情况
@@ -404,22 +404,44 @@
 
         /**
          * 从 JavDB 页面提取番号
+         *
+         * 采用“结构优先 + 文案兜底”的双重策略，避免因页面语言切换
+         * （繁體「番號」/ 简体「番号」/ 英文 ID）导致提取失败：
+         *   1. 优先用固定的结构特征 `.panel-block.first-block` 定位番号行；
+         *   2. 结构未命中时，回退到文案匹配（繁体/简体/ID 全覆盖）。
          */
         fromJavDBPage() {
-            const panelBlocks = document.querySelectorAll('.panel-block');
+            let block = null;
 
-            for (const block of panelBlocks) {
-                if (block.textContent.includes('番號') || block.textContent.includes('ID')) {
-                    const valueSpan = block.querySelector('.value');
-                    if (valueSpan) {
-                        return {
-                            code: valueSpan.textContent.trim().toUpperCase(),
-                            targetBlock: block
-                        };
+            // —— 主路径：用固定结构特征定位，完全不受语言文案影响 ——
+            const firstBlock = document.querySelector('.panel-block.first-block');
+            if (firstBlock && firstBlock.querySelector('.value')) {
+                block = firstBlock;
+            }
+
+            // —— 兜底：结构变化时，回退到文案匹配（繁/简/ID 全覆盖） ——
+            if (!block) {
+                const panelBlocks = document.querySelectorAll('.panel-block');
+                for (const b of panelBlocks) {
+                    const text = b.textContent || '';
+                    if (text.includes('番號') || text.includes('番号') || text.includes('ID')) {
+                        if (b.querySelector('.value')) {
+                            block = b;
+                            break;
+                        }
                     }
                 }
             }
-            return null;
+
+            if (!block) return null;
+
+            const valueSpan = block.querySelector('.value');
+            if (!valueSpan) return null;
+
+            return {
+                code: valueSpan.textContent.trim().toUpperCase(),
+                targetBlock: block
+            };
         },
 
         /**
