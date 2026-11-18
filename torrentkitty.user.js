@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.5
+// @version      4.6
 // @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -71,7 +71,7 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.5';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.6';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -2032,17 +2032,26 @@
 
         getNextPageUrl(pageNum) {
             const url = new URL(window.location.href);
+            const paginationLinks = document.querySelectorAll('.pagination a[href], .pages a[href]');
+            for (const link of paginationLinks) {
+                const href = link.getAttribute('href');
+                if (!href) continue;
+                const linkUrl = new URL(href, url);
+                if (linkUrl.origin !== url.origin) continue;
+                const linkPage = linkUrl.pathname.split('/').filter(Boolean).pop();
+                if (linkPage === String(pageNum)) return linkUrl.href;
+            }
+
             const pathParts = url.pathname.split('/').filter(Boolean);
             if (pathParts[0] === 'search' && pathParts[1]) {
-                return `${url.origin}/search/${pathParts[1]}/${pageNum}`;
-            }
-            const paginationLinks = document.querySelectorAll('.pagination a, .pages a');
-            for (let link of paginationLinks) {
-                const href = link.getAttribute('href');
-                const regex = new RegExp(`\\/${pageNum}(?:$|\\/|\\?|#)`);
-                if (href && regex.test(href)) {
-                    return new URL(href, window.location.origin).href;
+                if (/^\d+$/.test(pathParts[2] || '')) {
+                    pathParts[2] = String(pageNum);
+                } else {
+                    pathParts.splice(2, 0, String(pageNum));
                 }
+                url.pathname = '/' + pathParts.join('/');
+                url.hash = '';
+                return url.href;
             }
             return null;
         },
@@ -2235,7 +2244,7 @@
                 btn.className = 'tk-toolbar-btn';
                 btn.style.marginLeft = '12px';
                 btn.onclick = () => {
-                    state.targetValidCount += 8;
+                    state.targetValidCount = this.getValidRowsCount() + 8;
                     this.showStatusBanner('正在拉取数据...', false);
                     this.checkPaginationAndDispatch();
                 };
@@ -2300,6 +2309,7 @@
         loadNextPage(pageNum) {
             const nextUrl = this.getNextPageUrl(pageNum);
             if (!nextUrl) {
+                console.warn(`[TorrentKitty] 无法解析第 ${pageNum} 页 URL`, window.location.href);
                 this.showStatusBanner(`已无更多页面或无法解析翻页链接。当前累计项目: ${this.getValidRowsCount()} 条`, true);
                 this.dispatchQueue();
                 return;
@@ -2318,7 +2328,10 @@
                 
                 const resultsTable = this.getResultsTable();
                 if (!resultsTable) {
+                    console.error('[TorrentKitty] 已获取翻页响应，但当前页找不到结果表格容器');
                     state.isFetchingPage = false;
+                    state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
+                    this.showStatusBanner('已获取下一页，但无法识别结果表格。请检查页面结构或脚本版本。', true);
                     return;
                 }
 
