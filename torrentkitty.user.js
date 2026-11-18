@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.6
+// @version      4.7
 // @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -71,7 +71,7 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.6';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.7';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -340,6 +340,17 @@
                     width: 95% !important;
                     max-width: var(--tk-page-max-width, 1200px) !important;
                     margin: 0 auto !important;
+                }
+
+                .reco-container,
+                .vpn-warning,
+                #sticky-banner.sticky-banner,
+                body > div.becbdbcf,
+                body > div:has(> a[href*="zoog.pro/"]),
+                body > a[href*="rapidadexchange.com/"],
+                #main .wrapper > div:has(> #rotator1_div),
+                .tk-page-clutter {
+                    display: none !important;
                 }
 
                 /* 隐藏原网页表格与分页器 */
@@ -2057,6 +2068,13 @@
         },
 
         processRows() {
+            document.querySelectorAll('#main .wrapper > p, #main .wrapper > div > style').forEach(node => {
+                if (node.tagName === 'P' && /^Latest Search\s*:/i.test(node.textContent.trim())) {
+                    node.classList.add('tk-page-clutter');
+                } else if (node.tagName === 'STYLE' && node.textContent.includes('#M230766ScriptRoot')) {
+                    node.parentElement.classList.add('tk-page-clutter');
+                }
+            });
             GridContainer.init();
 
             const resultRows = this.getResultRows();
