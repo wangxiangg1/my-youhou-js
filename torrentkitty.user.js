@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.7
+// @version      4.8
 // @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini
 // @match        *://www.torrentkitty.tv/*
@@ -26,6 +26,8 @@
 // @match        *://torrentkitty.dev/*
 // @updateURL    https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
+// @run-at       document-start
+// @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -46,6 +48,29 @@
 
 (function () {
     'use strict';
+
+    const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+    const adPopupDomains = ['rebrand.ly', 'wingsmob.com', 'acscdn.com', 'rapidadexchange.com'];
+    const openPopup = pageWindow.open;
+    pageWindow.open = function (url, ...args) {
+        let host;
+        try {
+            host = new URL(url, location.href).hostname;
+        } catch {
+            // Let the browser handle malformed URLs as usual.
+        }
+        if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
+            return null;
+        }
+        return Reflect.apply(openPopup, this, [url, ...args]);
+    };
+
+    // Skip the site's delayed promotional click handler and keep the native magnet action.
+    window.addEventListener('click', event => {
+        if (event.target.closest?.('a[href^="magnet:"]')) {
+            event.stopImmediatePropagation();
+        }
+    }, true);
 
     // ==================== GM_xmlhttpRequest Promise 封装 ====================
     function gmFetch(url) {
@@ -71,7 +96,7 @@
     }
 
     // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.7';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.8';
 
     // ==================== 配置常量 ====================
     const CONFIG = {
@@ -281,21 +306,22 @@
             style.id = 'tk-enhanced-styles';
             style.textContent = `
                 :root {
-                    --tk-sage: #8B9D83;           /* 鼠尾草 — 主色 */
-                    --tk-clay: #B08B6E;           /* 陶土 — 辅色 */
-                    --tk-terracotta: #C66B3D;     /* 赭石 — 强调色 */
-                    --tk-ochre: #C08E3A;          /* 赭黄 — 警告 */
-                    --tk-moss: #606C38;           /* 苔藓 — 盈利 */
-                    --tk-sand: #E8DCC7;           /* 沙色 — 浅色背景 */
-                    --tk-oat: #D4B895;            /* 燕麦 — 卡片背景 */
-                    --tk-earth-dark: #3D3226;     /* 深棕 — 文字 */
-                    --tk-earth-darker: #2A2118;   /* 更深棕 — 标题 */
-                    --tk-loss-red: #9B3B2A;       /* 泥土红 */
+                    --tk-sage: #186459;
+                    --tk-clay: #495968;
+                    --tk-terracotta: #963f32;
+                    --tk-ochre: #805816;
+                    --tk-moss: #205e54;
+                    --tk-sand: #f3ecdc;
+                    --tk-oat: #fcf8ef;
+                    --tk-earth-dark: #4d5b67;
+                    --tk-earth-darker: #192630;
+                    --tk-loss-red: #963f32;
 
                     /* === 表面 === */
                     --tk-bg: var(--tk-sand);
                     --tk-card-bg: var(--tk-oat);
-                    --tk-card-border: rgba(61, 50, 38, 0.15);
+                    --tk-card-border: #ded3bf;
+                    --tk-control-border: #83939e;
                     --tk-text-main: var(--tk-earth-darker);
                     --tk-text-muted: var(--tk-earth-dark);
                     --tk-primary: var(--tk-sage);
@@ -304,7 +330,7 @@
                     --tk-success: var(--tk-moss);
 
                     --tk-font-display: 'Fraunces', serif;
-                    --tk-font-body: 'Epilogue', sans-serif;
+                    --tk-font-body: 'Epilogue', system-ui, 'Microsoft YaHei', sans-serif;
                     --tk-font-mono: 'IBM Plex Mono', monospace;
                     --tk-page-max-width: 1200px;
                 }
@@ -336,6 +362,34 @@
                 }
 
                 /* 放宽原生 .wrapper 的最大宽度限制 */
+                header .login,
+                header .login a {
+                    color: var(--tk-text-muted) !important;
+                }
+
+                header .login a {
+                    font-weight: 600;
+                    text-decoration: underline;
+                    text-underline-offset: 3px;
+                }
+
+                #main nav > a.menu {
+                    background: #e4f1ee !important;
+                    color: var(--tk-moss) !important;
+                    border: 1px solid #b6cbc5;
+                }
+
+                #main nav > a.menu:hover {
+                    background: var(--tk-primary) !important;
+                    color: #fff !important;
+                }
+
+                header .login a:focus-visible,
+                #main nav > a.menu:focus-visible {
+                    outline: 2px solid var(--tk-primary);
+                    outline-offset: 2px;
+                }
+
                 .wrapper {
                     width: 95% !important;
                     max-width: var(--tk-page-max-width, 1200px) !important;
@@ -373,7 +427,7 @@
                 /* 网格布局 */
                 .tk-grid-wrapper {
                     display: grid;
-                    grid-template-columns: repeat(auto-fill, minmax(var(--tk-card-width, 280px), 1fr));
+                    grid-template-columns: repeat(auto-fill, minmax(min(100%, var(--tk-card-width, 280px)), 1fr));
                     gap: 24px;
                     padding: 16px 0;
                 }
@@ -402,7 +456,7 @@
                 .tk-card-cover-wrapper {
                     position: relative;
                     width: 100%;
-                    background: #e0d3be;
+                    background: var(--tk-bg);
                     overflow: hidden;
                     aspect-ratio: 4 / 3;
                     display: flex;
@@ -414,7 +468,7 @@
                 .tk-skeleton {
                     position: absolute;
                     top: 0; left: 0; right: 0; bottom: 0;
-                    background: linear-gradient(90deg, #e0d3be 25%, #ebdcb7 50%, #e0d3be 75%);
+                    background: linear-gradient(90deg, var(--tk-bg) 25%, var(--tk-card-bg) 50%, var(--tk-bg) 75%);
                     background-size: 200% 100%;
                     animation: tk-shimmer 1.5s infinite;
                     z-index: 1;
@@ -476,17 +530,18 @@
                 }
 
                 .tk-card-meta {
-                    font-size: 11px;
-                    color: var(--tk-earth-dark);
-                    font-family: var(--tk-font-mono);
+                    font-size: 12px;
+                    color: var(--tk-text-muted);
+                    font-variant-numeric: tabular-nums;
                 }
 
                 .tk-card-title {
-                    font-size: 13px;
-                    font-weight: 600;
+                    font-size: 15px;
+                    font-weight: 650;
                     color: var(--tk-earth-darker);
                     line-height: 1.5;
-                    height: 38px;
+                    height: 3em;
+                    overflow-wrap: anywhere;
                     overflow: hidden;
                     display: -webkit-box;
                     -webkit-line-clamp: 2;
@@ -505,7 +560,7 @@
 
                 .tk-btn-modern {
                     padding: 8px 4px;
-                    font-size: 11px;
+                    font-size: 12px;
                     font-weight: 700;
                     border-radius: 8px;
                     text-align: center;
@@ -520,7 +575,7 @@
                 }
 
                 .tk-btn-download {
-                    background: rgba(176, 139, 110, 0.15); /* clay 辅色 */
+                    background: #edf1f4;
                     color: var(--tk-earth-dark);
                     border-color: rgba(176, 139, 110, 0.3);
                 }
@@ -529,9 +584,8 @@
                     color: #fff;
                 }
 
-                /* 复制磁力按钮（与下载按钮配色统一，语义独立） */
-                .tk-btn-magnet {
-                    background: rgba(139, 157, 131, 0.15); /* sage 鼠尾草 */
+                .tk-btn-magnet, .tk-btn-javdb {
+                    background: #e4f1ee;
                     color: var(--tk-moss);
                     border-color: rgba(139, 157, 131, 0.3);
                 }
@@ -541,7 +595,7 @@
                 }
 
                 .tk-btn-missav {
-                    background: rgba(198, 107, 61, 0.12); /* terracotta 赭石 */
+                    background: #fbeeea;
                     color: var(--tk-loss-red);
                     border-color: rgba(198, 107, 61, 0.25);
                 }
@@ -550,17 +604,13 @@
                     color: #fff;
                 }
 
-                .tk-btn-javdb {
-                    background: rgba(139, 157, 131, 0.15); /* sage 鼠尾草 */
-                    color: var(--tk-moss);
-                    border-color: rgba(139, 157, 131, 0.3);
-                }
                 .tk-btn-javdb:hover:not(.disabled) {
                     background: var(--tk-sage);
                     color: #fff;
                 }
                 .tk-btn-javdb.disabled {
-                    opacity: 0.4;
+                    background: #edf1f4;
+                    color: var(--tk-text-muted);
                     cursor: not-allowed;
                 }
 
@@ -665,20 +715,34 @@
 
                 /* 现代化输入框 */
                 .tk-input-modern {
-                    background: #f0e6d3; /* 浅沙 */
-                    border: 1px solid var(--tk-card-border);
+                    background: var(--tk-card-bg);
+                    border: 1px solid var(--tk-control-border);
                     color: var(--tk-text-main);
                     border-radius: 8px;
                     padding: 8px 12px;
                     font-size: 13px;
-                    outline: none;
                     transition: all 0.2s;
                 }
 
                 .tk-input-modern:focus {
-                    border-color: var(--tk-clay);
-                    background: #fff;
-                    box-shadow: 0 0 0 3px rgba(176, 139, 110, 0.15);
+                    border-color: var(--tk-primary);
+                }
+
+                .tk-main-container :is(button, a, input):focus-visible,
+                .tk-detail-drawer :is(button, a, input):focus-visible {
+                    outline: 2px solid var(--tk-primary);
+                    outline-offset: 2px;
+                }
+
+                #tk-status-banner .tk-toolbar-btn {
+                    background: var(--tk-primary);
+                    color: #fff;
+                    border-color: transparent;
+                    margin: 4px 0 4px 12px;
+                }
+
+                #tk-status-banner .tk-toolbar-btn:hover {
+                    background: #114d45;
                 }
 
                 /* 右侧抽屉 */
@@ -702,7 +766,7 @@
                 .tk-detail-drawer {
                     position: fixed;
                     top: 0; right: -420px; width: 380px; height: 100%;
-                    background: #e0d3be;
+                    background: var(--tk-bg);
                     border-left: 1px solid var(--tk-card-border);
                     z-index: 99999;
                     box-shadow: -15px 0 40px rgba(61, 50, 38, 0.15);
@@ -2260,7 +2324,6 @@
                 const btn = document.createElement('button');
                 btn.innerText = '加载更多';
                 btn.className = 'tk-toolbar-btn';
-                btn.style.marginLeft = '12px';
                 btn.onclick = () => {
                     state.targetValidCount = this.getValidRowsCount() + 8;
                     this.showStatusBanner('正在拉取数据...', false);
@@ -2491,7 +2554,11 @@
         }
     };
 
-    App.init();
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => App.init(), { once: true });
+    } else {
+        App.init();
+    }
 
     window.addEventListener('beforeunload', () => App.cleanup());
 
