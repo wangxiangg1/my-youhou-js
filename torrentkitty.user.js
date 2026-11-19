@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.9
+// @version      4.9.1
 // @description  TorrentKitty 增强：卡片化网格浏览流、版本标签识别、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -187,6 +187,43 @@
         },
 
         /**
+         * 清洗标题中的常见站点/发布组水印，避免 SIS001 / hhd800.com 等前缀被误识别为番号
+         */
+        sanitizeCodeSource(text) {
+            if (!text) return '';
+            return String(text)
+                // 移除带顶级域名的站点水印，如 hhd800.com@ / sis001.com@ / [ThZu.Cc] / sex8.cc@
+                .replace(/(?:^|[\s@[\]()_.-])[a-z0-9-]+\.(?:com|net|org|cc|tv|me|xyz|info|biz|top|club|vip|site|la|pw|tk|ml|ga|cf|gq|co|io)(?=$|[\s@[\]()_.-])/gi, ' ')
+                // 移除常见无连字符站点/编码标识，如 @SIS001@ / HHD800 / XP1024 / X1080X
+                .replace(/(?:^|[\s@[\]()_.-])(?:SIS001|HHD800|XP1024|X1080X|H264|H265|X264|X265)(?=$|[\s@[\]()_.-])/gi, ' ');
+        },
+
+        /**
+         * 统一提取并标准化番号：
+         * 1. 先剥离常见站点水印前缀
+         * 2. 优先匹配带连字符的标准番号（如 SSIS-858），避免被前置无连字符标识误抢
+         * 3. 回退匹配无连字符番号（如 SSIS858 -> SSIS-858）与 n1234 格式
+         */
+        extractCode(text) {
+            const cleaned = this.sanitizeCodeSource(text);
+            if (!cleaned) return null;
+
+            const dashedMatch = cleaned.match(CONFIG.dashedCodeRegex);
+            if (dashedMatch) {
+                return dashedMatch[1].toUpperCase();
+            }
+
+            const fallbackMatch = cleaned.match(CONFIG.codeRegex);
+            if (!fallbackMatch) return null;
+
+            let code = (fallbackMatch[1] || fallbackMatch[2]).toUpperCase();
+            if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
+                code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
+            }
+            return code;
+        },
+
+        /**
          * 复制文本：优先使用 GM_setClipboard，兼容非 HTTPS 与失焦场景
          */
         copyText(text) {
@@ -207,7 +244,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.1';
 
     const CONFIG = {
         defaults: {
@@ -231,7 +268,8 @@
         cache: {
             maxSize: 80
         },
-        codeRegex: /\b(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-?\d{3,5})\b|\b(n\d{4})\b/i,
+        dashedCodeRegex: /(?<![A-Z0-9])(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-\d{3,5})(?![A-Z0-9])/i,
+        codeRegex: /(?<![A-Z0-9])(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-?\d{3,5})(?![A-Z0-9])|(?<![A-Z0-9])(n\d{4})(?![A-Z0-9])/i,
         errorCacheExpiry: 5 * 60 * 1000,
         storageKey: 'torrentkitty_settings'
     };
@@ -2197,14 +2235,10 @@
                     const rowText = Utils.getRowText(row);
 
                     if (!row.dataset.validCode) {
-                        const match = rowText.match(CONFIG.codeRegex);
-                        if (!match) {
+                        const code = Utils.extractCode(rowText);
+                        if (!code) {
                             row.style.display = 'none';
                             return;
-                        }
-                        let code = (match[1] || match[2]).toUpperCase();
-                        if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
-                            code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
                         }
                         row.dataset.validCode = code;
                     }
@@ -2417,7 +2451,7 @@
                 let addedCount = 0;
                 nextRows.forEach(row => {
                     const rowText = Utils.getRowText(row);
-                    if (rowText.match(CONFIG.codeRegex)) {
+                    if (Utils.extractCode(rowText)) {
                         const importedRow = document.importNode(row, true);
                         importedRow.dataset.pageNum = pageNum;
                         importedRow.style.display = 'none';
@@ -2490,12 +2524,8 @@
                     const existingRows = this.getResultRows();
                     const existingKeys = new Set(existingRows.map((row, idx) => {
                         const rowText = Utils.getRowText(row);
-                        const match = rowText.match(CONFIG.codeRegex);
-                        if (!match) return '';
-                        let code = (match[1] || match[2]).toUpperCase();
-                        if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
-                            code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
-                        }
+                        const code = Utils.extractCode(rowText);
+                        if (!code) return '';
                         const magnet = row.querySelector('a[href^="magnet:"]')?.href || '';
                         const title = (row.querySelector('.name') || row.cells?.[0])?.textContent?.trim() || '';
                         return Utils.buildRowKey(code, magnet, title, idx + 1);
@@ -2503,10 +2533,14 @@
 
                     let restoreCount = 0;
                     cachedEntries.data.forEach((item, idx) => {
-                        const key = item.rowKey || Utils.buildRowKey(item.code, item.magnet, item.title, idx + 1);
+                        const fixedCode = Utils.extractCode(item.title) || item.code;
+                        const fixedItem = fixedCode !== item.code
+                            ? { ...item, code: fixedCode, rowKey: Utils.buildRowKey(fixedCode, item.magnet, item.title, idx + 1) }
+                            : item;
+                        const key = fixedItem.rowKey || Utils.buildRowKey(fixedItem.code, fixedItem.magnet, fixedItem.title, idx + 1);
                         if (!existingKeys.has(key)) {
                             existingKeys.add(key);
-                            const vRow = this.createVirtualRow({ ...item, rowKey: key });
+                            const vRow = this.createVirtualRow({ ...fixedItem, rowKey: key });
                             resultsTable.appendChild(vRow);
                             restoreCount++;
                         }
