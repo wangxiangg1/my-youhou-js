@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.9.1
+// @version      4.9.2
 // @description  TorrentKitty 增强：卡片化网格浏览流、版本标签识别、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -92,6 +92,7 @@
                     ok: response.status >= 200 && response.status < 300,
                     status: response.status,
                     statusText: response.statusText,
+                    finalUrl: response.finalUrl || url,
                     text: () => Promise.resolve(response.responseText)
                 }),
                 onerror: () => reject(new Error('网络请求失败')),
@@ -244,7 +245,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.1';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.2';
 
     const CONFIG = {
         defaults: {
@@ -557,6 +558,100 @@
                 .tk-ver-ai {
                     background: #805816;
                     color: #fcf8ef;
+                }
+
+                /* JavDB 登录/验证提醒条 */
+                .tk-javdb-notice {
+                    display: none;
+                    align-items: center;
+                    justify-content: space-between;
+                    gap: 12px;
+                    flex-wrap: wrap;
+                    margin: 0 0 18px 0;
+                    padding: 12px 16px;
+                    border-radius: 12px;
+                    font-family: var(--tk-font-body);
+                    font-size: 13px;
+                    line-height: 1.5;
+                    box-shadow: 0 4px 14px rgba(61, 50, 38, 0.06);
+                    transition: all 0.25s ease;
+                }
+
+                .tk-javdb-notice.is-visible {
+                    display: flex;
+                }
+
+                .tk-javdb-notice--info {
+                    background: #fbf4e4;
+                    border: 1px solid rgba(128, 88, 22, 0.28);
+                    color: #5a4218;
+                }
+
+                .tk-javdb-notice--warning {
+                    background: #fdf0ec;
+                    border: 1px solid rgba(150, 63, 50, 0.35);
+                    color: #7a2e23;
+                }
+
+                .tk-javdb-notice-text {
+                    flex: 1 1 260px;
+                    font-weight: 500;
+                }
+
+                .tk-javdb-notice-actions {
+                    display: flex;
+                    align-items: center;
+                    gap: 8px;
+                    flex-wrap: wrap;
+                }
+
+                .tk-javdb-notice-btn {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    padding: 6px 12px;
+                    border-radius: 8px;
+                    font-size: 12px;
+                    font-weight: 600;
+                    cursor: pointer;
+                    text-decoration: none;
+                    border: 1px solid transparent;
+                    transition: all 0.2s ease;
+                }
+
+                .tk-javdb-notice-btn--primary {
+                    background: #805816;
+                    color: #fcf8ef !important;
+                }
+
+                .tk-javdb-notice--warning .tk-javdb-notice-btn--primary {
+                    background: #963f32;
+                }
+
+                .tk-javdb-notice-btn--primary:hover {
+                    filter: brightness(1.08);
+                    transform: translateY(-1px);
+                }
+
+                .tk-javdb-notice-btn--secondary {
+                    background: rgba(255, 255, 255, 0.72);
+                    color: inherit;
+                    border-color: rgba(61, 50, 38, 0.2);
+                }
+
+                .tk-javdb-notice-btn--secondary:hover {
+                    background: rgba(255, 255, 255, 0.95);
+                }
+
+                .tk-javdb-notice-btn--ghost {
+                    background: transparent;
+                    color: inherit;
+                    opacity: 0.75;
+                    padding: 6px 8px;
+                }
+
+                .tk-javdb-notice-btn--ghost:hover {
+                    opacity: 1;
                 }
 
                 /* 卡片内容区 */
@@ -964,7 +1059,12 @@
         currentBackoff: 0,
         consecutiveErrors: 0,
         hadProcessedRows: false,
-        rowSeq: 0
+        rowSeq: 0,
+        isPausedForLogin: false,
+        javdbSuccessCount: 0,
+        javdbConsecutiveMisses: 0,
+        failedCodesForRetry: new Set(),
+        javdbNoticeLevel: null
     };
 
     // ==================== 设置管理 ====================
@@ -1304,11 +1404,46 @@
             state.currentBackoff = 0;
         },
 
+        resumeAfterLogin() {
+            state.isPausedForLogin = false;
+            this.resetError();
+            state.javdbConsecutiveMisses = 0;
+
+            const queuedSet = new Set(state.requestQueue.map(item => item.code));
+            const codesToRetry = Array.from(state.failedCodesForRetry);
+            state.failedCodesForRetry.clear();
+
+            // 逆序插回队首，保持原有顺序优先重试
+            for (let i = codesToRetry.length - 1; i >= 0; i--) {
+                const code = codesToRetry[i];
+                const cached = CacheManager.get(code);
+                if (cached && (!cached.coverId || cached.isError)) {
+                    CacheManager.remove(code);
+                }
+                if (!queuedSet.has(code)) {
+                    state.requestQueue.unshift({ code, retries: 0 });
+                    queuedSet.add(code);
+                }
+            }
+
+            if (typeof GridContainer !== 'undefined' && GridContainer.hideJavdbNotice) {
+                GridContainer.hideJavdbNotice();
+            }
+            if (typeof App !== 'undefined' && App.showStatusBanner && state.requestQueue.length > 0) {
+                App.showStatusBanner(`正在重试拉取封面数据（剩余 ${state.requestQueue.length} 项）...`, true);
+            }
+            this.process();
+        },
+
         async process() {
+            if (state.isPausedForLogin) {
+                return;
+            }
+
             if (state.isProcessing || state.requestQueue.length === 0) {
                 if (!state.isProcessing && state.requestQueue.length === 0 && typeof App !== 'undefined' && App.showStatusBanner) {
                     const banner = document.getElementById('tk-status-banner');
-                    if (banner && (banner.textContent.includes('正在异步') || banner.textContent.includes('排队加载'))) {
+                    if (banner && (banner.textContent.includes('正在异步') || banner.textContent.includes('排队加载') || banner.textContent.includes('正在重试拉取'))) {
                         App.showStatusBanner('封面数据全部加载完成！', true);
                     }
                 }
@@ -1329,6 +1464,36 @@
                 this.resetError();
             } catch (e) {
                 console.error('[TorrentKitty] 队列处理错误:', e);
+
+                if (e.message === 'LOGIN_REQUIRED') {
+                    state.isPausedForLogin = true;
+                    state.isProcessing = false;
+                    state.failedCodesForRetry.add(task.code);
+                    if (!state.requestQueue.some(item => item.code === task.code)) {
+                        state.requestQueue.unshift({ code: task.code, retries: 0 });
+                    }
+                    const debugInfo = state.debugInfoMap.get(task.code) || JavDBService.createDebugInfo(task.code);
+                    if (!debugInfo.errorMessage) {
+                        debugInfo.errorMessage = '需要登录 JavDB 才能拉取封面';
+                    }
+                    UIUpdater.updateCode(task.code, debugInfo, {
+                        url: null,
+                        coverId: null,
+                        fallbackLabel: '[请先登录 JavDB]'
+                    });
+                    if (typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
+                        GridContainer.showJavdbNotice({
+                            level: 'warning',
+                            message: '检测到 JavDB 需要登录，未登录将无法拉取封面（已暂停队列）。请先在浏览器登录 JavDB，完成后点击右侧重试。',
+                            showRetry: true
+                        });
+                    }
+                    if (typeof App !== 'undefined' && App.showStatusBanner) {
+                        App.showStatusBanner('检测到 JavDB 需要登录，已暂停封面拉取，请登录 JavDB 后点击顶部重试按钮。', true);
+                    }
+                    return;
+                }
+
                 this.handleError();
 
                 // 限流或验证码允许退避重试；IP 封禁或超过重试次数则直接落入失败态展示
@@ -1339,6 +1504,7 @@
                     task.retries++;
                     state.requestQueue.push(task);
                 } else {
+                    state.failedCodesForRetry.add(task.code);
                     const debugInfo = state.debugInfoMap.get(task.code) || JavDBService.createDebugInfo(task.code);
                     if (!debugInfo.errorMessage) {
                         debugInfo.errorMessage = e.message || String(e);
@@ -1348,6 +1514,13 @@
                         coverId: null,
                         fallbackLabel: `[${debugInfo.errorMessage}]`
                     });
+                    if (['IP_BANNED', 'CAPTCHA_DETECTED'].includes(e.message) && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
+                        GridContainer.showJavdbNotice({
+                            level: 'warning',
+                            message: 'JavDB 触发访问限制或验证（403/验证码），未登录更容易被拦截。建议前往 JavDB 登录并完成验证后点击重试。',
+                            showRetry: true
+                        });
+                    }
                 }
             }
 
@@ -1366,6 +1539,22 @@
             return `https://c0.jdbstatic.com/covers/${prefix}/${coverId}.jpg`;
         },
 
+        isLoginRequired(response, html) {
+            if (response && response.status === 401) return true;
+            const finalUrl = (response && response.finalUrl) || '';
+            if (/\/(?:login|users\/sign_in)(?:[/?#]|$)/i.test(finalUrl)) {
+                return true;
+            }
+            if (!html) return false;
+            // 若已包含影片列表，说明搜索页正常返回
+            if (html.includes('movie-list')) return false;
+            return (
+                /action=["'][^"']*\/users\/sign_in["']/i.test(html) ||
+                /name=["']user\[email\]["']/i.test(html) ||
+                /請先登入|请先登录|登入後才能|登录后才能|需要登入|需要登录|Please sign in/i.test(html)
+            );
+        },
+
         async fetchInfo(code, retryAttempt = 0) {
             const debugInfo = this.createDebugInfo(code);
             if (retryAttempt > 0) {
@@ -1374,6 +1563,12 @@
 
             const cached = CacheManager.get(code);
             if (cached) {
+                if (cached.coverId) {
+                    state.javdbSuccessCount++;
+                    if (state.javdbNoticeLevel === 'info' && typeof GridContainer !== 'undefined' && GridContainer.hideJavdbNotice) {
+                        GridContainer.hideJavdbNotice();
+                    }
+                }
                 state.debugInfoMap.set(code, cached.debugInfo || debugInfo);
                 UIUpdater.updateCode(code, cached.debugInfo || debugInfo, cached);
                 return;
@@ -1385,6 +1580,11 @@
 
                 const response = await gmFetch(searchUrl);
                 debugInfo.fetchStatus = `HTTP ${response.status} ${response.statusText}`;
+
+                if (response.status === 401) {
+                    debugInfo.errorMessage = '需要登录 JavDB 才能拉取封面 (401)';
+                    throw new Error('LOGIN_REQUIRED');
+                }
 
                 if (response.status === 429) {
                     debugInfo.errorMessage = '请求过于频繁 (429)';
@@ -1402,6 +1602,11 @@
 
                 const html = await response.text();
 
+                if (this.isLoginRequired(response, html)) {
+                    debugInfo.errorMessage = '需要登录 JavDB 才能拉取封面';
+                    throw new Error('LOGIN_REQUIRED');
+                }
+
                 if (html.includes('cf-challenge') || html.includes('captcha')) {
                     debugInfo.errorMessage = '检测到 Cloudflare 挑战/验证码';
                     throw new Error('CAPTCHA_DETECTED');
@@ -1410,6 +1615,12 @@
                 const result = this.parseSearchResult(html, code);
 
                 if (result) {
+                    state.javdbSuccessCount++;
+                    state.javdbConsecutiveMisses = 0;
+                    if (state.javdbNoticeLevel === 'info' && typeof GridContainer !== 'undefined' && GridContainer.hideJavdbNotice) {
+                        GridContainer.hideJavdbNotice();
+                    }
+
                     debugInfo.foundResult = true;
                     debugInfo.javdbUrl = result.url;
                     debugInfo.coverId = result.coverId;
@@ -1420,23 +1631,36 @@
                     CacheManager.set(code, payload);
                     UIUpdater.updateCode(code, debugInfo, payload);
                 } else {
+                    state.javdbConsecutiveMisses++;
+                    state.failedCodesForRetry.add(code);
                     debugInfo.errorMessage = '未找到匹配的番号数据';
                     const payload = { url: null, coverId: null, debugInfo };
                     state.debugInfoMap.set(code, debugInfo);
                     CacheManager.set(code, payload);
                     UIUpdater.updateCode(code, debugInfo, payload);
+
+                    if (state.javdbSuccessCount === 0 && state.javdbConsecutiveMisses >= 3 && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
+                        GridContainer.showJavdbNotice({
+                            level: 'warning',
+                            message: '已连续多次未能从 JavDB 拉取到封面，可能尚未登录 JavDB 或需要通过人机验证。请前往 JavDB 登录后点击重试。',
+                            showRetry: true
+                        });
+                    }
                 }
             } catch (error) {
                 debugInfo.errorMessage = debugInfo.errorMessage || error.message || String(error);
                 state.debugInfoMap.set(code, debugInfo);
                 console.error('[TorrentKitty] JavDB 请求出错:', error);
 
-                const isRateOrBan = ['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
-                if (isRateOrBan) {
+                const isSpecialControl = ['LOGIN_REQUIRED', 'RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
+                if (isSpecialControl) {
                     // 实时更新抽屉日志（即使尚未最终放弃，也可在抽屉看到当前状态）
                     UIUpdater.refreshDrawerLogs(code, debugInfo);
                     throw error;
                 }
+
+                state.javdbConsecutiveMisses++;
+                state.failedCodesForRetry.add(code);
 
                 const payload = {
                     url: null,
@@ -1450,6 +1674,14 @@
                     ...payload,
                     fallbackLabel: `[拉取失败: ${debugInfo.errorMessage}]`
                 });
+
+                if (state.javdbSuccessCount === 0 && state.javdbConsecutiveMisses >= 3 && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
+                    GridContainer.showJavdbNotice({
+                        level: 'warning',
+                        message: '封面拉取连续失败，请确认已在浏览器登录 JavDB（且可正常访问），完成后点击重试。',
+                        showRetry: true
+                    });
+                }
             }
         },
 
@@ -1581,6 +1813,11 @@
             `;
             root.appendChild(toolbar);
 
+            const javdbNotice = document.createElement('div');
+            javdbNotice.id = 'tk-javdb-notice';
+            javdbNotice.className = 'tk-javdb-notice';
+            root.appendChild(javdbNotice);
+
             const grid = document.createElement('div');
             grid.id = 'tk-modern-grid';
             grid.className = 'tk-grid-wrapper';
@@ -1642,6 +1879,74 @@
 
             document.getElementById('tk-btn-config').onclick = () => ModalManager.showSettings();
             this.syncConfigDimensions();
+
+            // 首次/未关闭提示时展示轻量引导（成功加载任意封面后自动隐藏）
+            const loginTipDismissed = typeof GM_getValue === 'function'
+                ? GM_getValue('tk_javdb_login_tip_dismissed', false)
+                : false;
+            if (!loginTipDismissed && state.javdbSuccessCount === 0) {
+                this.showJavdbNotice({
+                    level: 'info',
+                    message: '💡 提示：封面数据来自 JavDB，若无法加载封面，请先在浏览器登录 JavDB 账号。',
+                    showRetry: false,
+                    showDismissForever: true
+                });
+            }
+        },
+
+        showJavdbNotice({ level = 'warning', message, showRetry = true, showDismissForever = false } = {}) {
+            const notice = document.getElementById('tk-javdb-notice');
+            if (!notice) return;
+
+            state.javdbNoticeLevel = level;
+            notice.className = `tk-javdb-notice tk-javdb-notice--${level} is-visible`;
+            notice.textContent = '';
+
+            const textEl = document.createElement('div');
+            textEl.className = 'tk-javdb-notice-text';
+            textEl.textContent = message || '请先前往 JavDB 登录账号以正常拉取封面。';
+            notice.appendChild(textEl);
+
+            const actionsEl = document.createElement('div');
+            actionsEl.className = 'tk-javdb-notice-actions';
+
+            const loginLink = document.createElement('a');
+            loginLink.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--primary';
+            loginLink.href = 'https://javdb.com/login';
+            loginLink.target = '_blank';
+            loginLink.rel = 'noopener noreferrer';
+            loginLink.textContent = '🔐 前往 JavDB 登录';
+            actionsEl.appendChild(loginLink);
+
+            if (showRetry) {
+                const retryBtn = document.createElement('button');
+                retryBtn.type = 'button';
+                retryBtn.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--secondary';
+                retryBtn.textContent = '↻ 我已登录，重试拉取';
+                retryBtn.onclick = () => QueueManager.resumeAfterLogin();
+                actionsEl.appendChild(retryBtn);
+            }
+
+            const closeBtn = document.createElement('button');
+            closeBtn.type = 'button';
+            closeBtn.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--ghost';
+            closeBtn.textContent = showDismissForever ? '不再提示' : '✕ 关闭';
+            closeBtn.onclick = () => {
+                if (showDismissForever && typeof GM_setValue === 'function') {
+                    GM_setValue('tk_javdb_login_tip_dismissed', true);
+                }
+                this.hideJavdbNotice();
+            };
+            actionsEl.appendChild(closeBtn);
+
+            notice.appendChild(actionsEl);
+        },
+
+        hideJavdbNotice() {
+            const notice = document.getElementById('tk-javdb-notice');
+            if (!notice) return;
+            state.javdbNoticeLevel = null;
+            notice.classList.remove('is-visible');
         },
 
         syncConfigDimensions() {
