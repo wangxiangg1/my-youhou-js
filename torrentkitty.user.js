@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.8
-// @description  TorrentKitty 增强：卡片化网格浏览流、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
-// @author       Gemini
+// @version      4.9
+// @description  TorrentKitty 增强：卡片化网格浏览流、版本标签识别、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
+// @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
 // @match        *://www.torrentkitty.com/*
@@ -32,6 +32,8 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
+// @grant        GM_listValues
+// @grant        GM_setClipboard
 // @connect      javdb.com
 // @connect      jdbstatic.com
 // @connect      torrentkitty.tv
@@ -49,25 +51,28 @@
 (function () {
     'use strict';
 
+    // ==================== 0. 早期广告弹窗拦截与磁力防劫持 ====================
     const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
     const adPopupDomains = ['rebrand.ly', 'wingsmob.com', 'acscdn.com', 'rapidadexchange.com'];
     const openPopup = pageWindow.open;
-    pageWindow.open = function (url, ...args) {
-        let host;
-        try {
-            host = new URL(url, location.href).hostname;
-        } catch {
-            // Let the browser handle malformed URLs as usual.
-        }
-        if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
-            return null;
-        }
-        return Reflect.apply(openPopup, this, [url, ...args]);
-    };
+    if (typeof openPopup === 'function') {
+        pageWindow.open = function (url, ...args) {
+            let host;
+            try {
+                host = new URL(url, location.href).hostname;
+            } catch {
+                // 交由浏览器按原样处理非法 URL
+            }
+            if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
+                return null;
+            }
+            return Reflect.apply(openPopup, this, [url, ...args]);
+        };
+    }
 
-    // Skip the site's delayed promotional click handler and keep the native magnet action.
+    // 跳过站点延迟推广点击劫持，保留原生磁力链接行为
     window.addEventListener('click', event => {
-        if (event.target.closest?.('a[href^="magnet:"]')) {
+        if (event.target?.closest?.('a[href^="magnet:"]')) {
             event.stopImmediatePropagation();
         }
     }, true);
@@ -89,20 +94,124 @@
                     statusText: response.statusText,
                     text: () => Promise.resolve(response.responseText)
                 }),
-                onerror: (error) => reject(new Error('网络请求失败')),
+                onerror: () => reject(new Error('网络请求失败')),
                 ontimeout: () => reject(new Error('请求超时'))
             });
         });
     }
 
-    // ==================== 版本常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.8';
+    // ==================== 通用工具函数 ====================
+    const Utils = {
+        escapeRegExp(str) {
+            return String(str).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        },
 
-    // ==================== 配置常量 ====================
+        /**
+         * 统一提取表格行文本：在离线 DOMParser 文档和隐藏表格上都稳定保留列间空格
+         */
+        getRowText(row) {
+            if (!row) return '';
+            if (row.cells && row.cells.length > 0) {
+                return Array.from(row.cells)
+                    .map(cell => (cell.textContent || '').trim())
+                    .filter(Boolean)
+                    .join(' ');
+            }
+            return (row.textContent || '').trim();
+        },
+
+        /**
+         * 从磁力链提取稳定去重键（BTIH），无磁力链时回退到标题哈希
+         */
+        buildRowKey(code, magnet, title, fallbackIndex) {
+            const btihMatch = magnet && magnet.match(/btih:([a-zA-Z0-9]+)/i);
+            if (btihMatch) {
+                return `${code}-${btihMatch[1].toLowerCase().slice(0, 12)}`;
+            }
+            // 简单稳定的字符串哈希，避免重复或非法 DOM ID 字符
+            const raw = `${code}|${title || ''}|${fallbackIndex}`;
+            let hash = 0;
+            for (let i = 0; i < raw.length; i++) {
+                hash = ((hash << 5) - hash + raw.charCodeAt(i)) | 0;
+            }
+            return `${code}-${(hash >>> 0).toString(36)}`;
+        },
+
+        /**
+         * 识别同番号不同版本标签：中字(C)、破解无码(U)、超级AI无码(LTX)
+         */
+        detectVersionTags(title, code) {
+            if (!title) return [];
+            const tags = [];
+            const upperTitle = title.toUpperCase();
+            const upperCode = (code || '').toUpperCase();
+            const compactCode = upperCode.replace(/-/g, '');
+
+            // 1. 超级 AI 无码 (LTX)
+            const hasLtx = /(?:^|[^A-Z0-9])LTX(?:[^A-Z0-9]|$)/i.test(upperTitle);
+            if (hasLtx) {
+                tags.push({ label: 'AI无码', type: 'ai' });
+            }
+
+            // 2. 紧跟在番号后的常见后缀，如 SSIS-001-C / SSIS-001-U / SSIS-001-UC / SSIS001C
+            let hasC = false;
+            let hasU = false;
+            const codePatterns = [upperCode, compactCode].filter(Boolean);
+            for (const cp of codePatterns) {
+                const suffixRegex = new RegExp(`${this.escapeRegExp(cp)}[-_. ]?(UC|CU|C|U)(?=$|[^A-Z0-9])`, 'i');
+                const m = upperTitle.match(suffixRegex);
+                if (m) {
+                    const suffix = m[1].toUpperCase();
+                    if (suffix.includes('C')) hasC = true;
+                    if (suffix.includes('U')) hasU = true;
+                }
+            }
+
+            // 独立标记或中文关键词兜底（若已命中 LTX，不再仅因“无码”二字重复打破解无码）
+            if (/(?:^|[\s[\](_-])(UC|CU)(?=$|[\s[\])_.-])/i.test(upperTitle)) {
+                hasC = true;
+                hasU = true;
+            }
+            if (!hasC && (/(?:^|[\s[\](_-])C(?=$|[\s[\])_.-])/i.test(upperTitle) || /中字|中文字幕|字幕/.test(title))) {
+                hasC = true;
+            }
+            const uChineseRegex = hasLtx ? /破解|流出/ : /破解|无码|流出/;
+            if (!hasU && (/(?:^|[\s[\](_-])U(?=$|[\s[\])_.-])/i.test(upperTitle) || uChineseRegex.test(title))) {
+                hasU = true;
+            }
+
+            if (hasU) tags.push({ label: '破解无码', type: 'uncensored' });
+            if (hasC) tags.push({ label: '中字', type: 'sub' });
+
+            return tags;
+        },
+
+        /**
+         * 复制文本：优先使用 GM_setClipboard，兼容非 HTTPS 与失焦场景
+         */
+        copyText(text) {
+            if (!text) return Promise.reject(new Error('空内容'));
+            if (typeof GM_setClipboard === 'function') {
+                try {
+                    GM_setClipboard(text, 'text');
+                    return Promise.resolve();
+                } catch (e) {
+                    // 降级到 navigator.clipboard
+                }
+            }
+            if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+                return navigator.clipboard.writeText(text);
+            }
+            return Promise.reject(new Error('剪贴板不可用'));
+        }
+    };
+
+    // ==================== 版本与配置常量 ====================
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9';
+
     const CONFIG = {
         defaults: {
             coverWidth: 280,
-            // coverHeight 已由 CSS aspect-ratio: 4/3 控制，此处不再保留死配置
             pageMaxWidth: 1200,
             maxPagesToFetch: 10
         },
@@ -110,127 +219,25 @@
             baseDelay: 1500,
             minRandomDelay: 500,
             maxRandomDelay: 1500,
-            maxConcurrent: 1,
             maxRequestsPerMinute: 24,
             errorBackoff: 5000,
-            maxBackoff: 60000
+            maxBackoff: 60000,
+            maxTaskRetries: 2
+        },
+        pagination: {
+            maxPageRetries: 3,
+            maxConsecutiveEmptyPages: 5
         },
         cache: {
             maxSize: 80
         },
         codeRegex: /\b(?!GB|MB|KB|MP|AES|UTF|ISO|SHA|MD5|CPU|GPU|USB|SSD|HDD|RAM|ROM|PDF|CSS|DNS|FTP|HTTP)([A-Z]{2,6}-?\d{3,5})\b|\b(n\d{4})\b/i,
         errorCacheExpiry: 5 * 60 * 1000,
-        maxPagesToFetch: 10,
         storageKey: 'torrentkitty_settings'
-    };
-
-    // ==================== 现代化莫兰迪颜色主题 (Organic) ====================
-    const COLORS = {
-        primary: {
-            bg: 'rgba(139, 157, 131, 0.15)', // sage 鼠尾草
-            bgSolid: '#8B9D83',
-            border: 'rgba(139, 157, 131, 0.3)',
-            hover: 'rgba(139, 157, 131, 0.25)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        success: {
-            bg: 'rgba(96, 108, 56, 0.12)', // moss 苔藓
-            bgSolid: '#606C38',
-            border: 'rgba(96, 108, 56, 0.25)',
-            hover: 'rgba(96, 108, 56, 0.2)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        warning: {
-            bg: 'rgba(192, 142, 58, 0.12)', // ochre 赭黄
-            bgSolid: '#C08E3A',
-            border: 'rgba(192, 142, 58, 0.25)',
-            hover: 'rgba(192, 142, 58, 0.2)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        danger: {
-            bg: 'rgba(155, 59, 42, 0.12)', // loss-red 泥土红
-            bgSolid: '#9B3B2A',
-            border: 'rgba(155, 59, 42, 0.25)',
-            hover: 'rgba(155, 59, 42, 0.2)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        info: {
-            bg: 'rgba(176, 139, 110, 0.12)', // clay 陶土
-            bgSolid: '#B08B6E',
-            border: 'rgba(176, 139, 110, 0.25)',
-            hover: 'rgba(176, 139, 110, 0.2)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        pink: {
-            bg: 'rgba(198, 107, 61, 0.12)', // terracotta 赭石
-            bgSolid: '#C66B3D',
-            border: 'rgba(198, 107, 61, 0.25)',
-            hover: 'rgba(198, 107, 61, 0.2)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        neutral: {
-            bg: 'rgba(61, 50, 38, 0.08)', // earth-dark 深棕
-            bgSolid: '#3D3226',
-            border: 'rgba(61, 50, 38, 0.15)',
-            hover: 'rgba(61, 50, 38, 0.12)',
-            shadow: 'rgba(0, 0, 0, 0.02)'
-        },
-        error: {
-            bg: 'rgba(155, 59, 42, 0.08)',
-            border: 'rgba(155, 59, 42, 0.2)',
-            text: '#9B3B2A',
-            backdrop: 'blur(8px)'
-        },
-        noResult: {
-            bg: 'rgba(61, 50, 38, 0.06)',
-            border: 'rgba(61, 50, 38, 0.15)',
-            text: '#3D3226',
-            backdrop: 'blur(8px)'
-        },
-        settingsGradient: 'linear-gradient(135deg, #E8DCC7 0%, #D4B895 100%)',
-        glass: {
-            bg: 'rgba(232, 220, 199, 0.75)',
-            border: 'rgba(61, 50, 38, 0.08)',
-            blur: 'backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);'
-        },
-        dark: {
-            bg: '#E8DCC7',
-            card: '#D4B895',
-            border: 'rgba(61, 50, 38, 0.15)',
-            text: '#2A2118',
-            textMuted: '#3D3226'
-        }
     };
 
     // ==================== 样式工具函数 ====================
     const StyleUtils = {
-        buttonBase(color, options = {}) {
-            const {
-                padding = '8px 16px',
-                fontSize = '12px',
-                margin = '0',
-                display = 'inline-flex'
-            } = options;
-
-            return `
-                display: ${display};
-                align-items: center;
-                justify-content: center;
-                padding: ${padding};
-                background: ${color.bg};
-                color: ${color.bgSolid};
-                border-radius: 8px;
-                text-decoration: none;
-                font-size: ${fontSize};
-                font-weight: 600;
-                font-family: 'Epilogue', sans-serif;
-                border: 1px solid ${color.border};
-                cursor: pointer;
-                margin: ${margin};
-                transition: all 0.2s ease;
-            `;
-        },
-
         overlay() {
             return `
                 position: fixed;
@@ -270,30 +277,6 @@
             `;
         },
 
-        infoBox(color, maxWidth) {
-            return `
-                padding: 12px 16px;
-                background: ${color.bg};
-                border: 1px solid ${color.border};
-                border-radius: 10px;
-                color: ${color.text || color.bgSolid};
-                font-size: 13px;
-                font-weight: 500;
-                font-family: 'Epilogue', sans-serif;
-                margin-top: 8px;
-                max-width: ${maxWidth}px;
-            `;
-        },
-
-        coverImage(width, height) {
-            return `
-                max-width: ${width}px;
-                max-height: ${height}px;
-                border-radius: 10px;
-                object-fit: cover;
-            `;
-        },
-
         injectGlobalStyles() {
             if (document.getElementById('tk-enhanced-styles')) return;
 
@@ -317,7 +300,6 @@
                     --tk-earth-darker: #192630;
                     --tk-loss-red: #963f32;
 
-                    /* === 表面 === */
                     --tk-bg: var(--tk-sand);
                     --tk-card-bg: var(--tk-oat);
                     --tk-card-border: #ded3bf;
@@ -338,17 +320,17 @@
                 @keyframes spin {
                     to { transform: rotate(360deg); }
                 }
-                
+
                 @keyframes fadeIn {
                     from { opacity: 0; }
                     to { opacity: 1; }
                 }
-                
+
                 @keyframes slideIn {
                     from { opacity: 0; transform: translateY(16px); }
                     to { opacity: 1; transform: translateY(0); }
                 }
-                
+
                 @keyframes tk-shimmer {
                     0% { background-position: 200% 0; }
                     100% { background-position: -200% 0; }
@@ -361,7 +343,6 @@
                     background: var(--tk-bg) !important;
                 }
 
-                /* 放宽原生 .wrapper 的最大宽度限制 */
                 header .login,
                 header .login a {
                     color: var(--tk-text-muted) !important;
@@ -490,7 +471,6 @@
                     transform: scale(1.04);
                 }
 
-                /* 封面代理异常遮罩 */
                 .tk-cover-fallback {
                     position: absolute;
                     bottom: 0; left: 0; right: 0;
@@ -501,6 +481,44 @@
                     font-size: 10px;
                     font-weight: 600;
                     font-family: var(--tk-font-mono);
+                    z-index: 2;
+                }
+
+                /* 版本角标（中字 / 破解无码 / AI无码） */
+                .tk-ver-badges {
+                    position: absolute;
+                    top: 10px;
+                    left: 10px;
+                    display: flex;
+                    flex-wrap: wrap;
+                    gap: 5px;
+                    z-index: 3;
+                    pointer-events: none;
+                }
+
+                .tk-ver-tag {
+                    padding: 2px 7px;
+                    border-radius: 6px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    letter-spacing: 0.2px;
+                    line-height: 1.4;
+                    box-shadow: 0 2px 6px rgba(25, 38, 48, 0.18);
+                }
+
+                .tk-ver-sub {
+                    background: #186459;
+                    color: #fcf8ef;
+                }
+
+                .tk-ver-uncensored {
+                    background: #963f32;
+                    color: #fcf8ef;
+                }
+
+                .tk-ver-ai {
+                    background: #805816;
+                    color: #fcf8ef;
                 }
 
                 /* 卡片内容区 */
@@ -516,6 +534,7 @@
                     display: flex;
                     justify-content: space-between;
                     align-items: center;
+                    gap: 8px;
                 }
 
                 .tk-card-code {
@@ -572,16 +591,6 @@
                     align-items: center;
                     justify-content: center;
                     gap: 4px;
-                }
-
-                .tk-btn-download {
-                    background: #edf1f4;
-                    color: var(--tk-earth-dark);
-                    border-color: rgba(176, 139, 110, 0.3);
-                }
-                .tk-btn-download:hover {
-                    background: var(--tk-clay);
-                    color: #fff;
                 }
 
                 .tk-btn-magnet, .tk-btn-javdb {
@@ -776,6 +785,7 @@
                     flex-direction: column;
                     gap: 24px;
                     box-sizing: border-box;
+                    overflow-y: auto;
                 }
 
                 .tk-detail-drawer.active {
@@ -898,6 +908,8 @@
     const state = {
         javdbCache: {},
         cacheOrder: [],
+        debugInfoMap: new Map(),     // code -> debugInfo（替代隐藏 DOM 寄生）
+        dispatchedCodes: new Set(),  // 已派发/已完成封面请求的番号集合，避免同番号重复请求
         requestQueue: [],
         isProcessing: false,
         isFetchingPage: false,
@@ -909,10 +921,12 @@
         fetchPageNum: 1,
         targetValidCount: 8,
         consecutiveEmptyPages: 0,
-        bannerTimeout: null,
+        pageRetryCount: 0,
         requestTimestamps: [],
         currentBackoff: 0,
-        consecutiveErrors: 0
+        consecutiveErrors: 0,
+        hadProcessedRows: false,
+        rowSeq: 0
     };
 
     // ==================== 设置管理 ====================
@@ -931,11 +945,6 @@
 
         save() {
             GM_setValue(CONFIG.storageKey, state.settings);
-        },
-
-        reset() {
-            state.settings = { ...CONFIG.defaults };
-            this.save();
         }
     };
 
@@ -944,6 +953,8 @@
         STORAGE_KEY: 'tk_javdb_cache',
         ORDER_KEY: 'tk_cache_order',
         EXPIRY_TIME: 24 * 60 * 60 * 1000,
+        _orderDirty: false,
+        _persistTimer: null,
 
         init() {
             try {
@@ -951,9 +962,6 @@
                 if (orderData) {
                     const parsed = typeof orderData === 'string' ? JSON.parse(orderData) : orderData;
                     const now = Date.now();
-
-                    // 先分离过期与未过期项，再统一删除过期项，
-                    // 避免把 GM_deleteValue 这种副作用塞进 Array.filter 谓词里
                     const expired = [];
                     state.cacheOrder = parsed.filter(item => {
                         const isExpired = (now - item.timestamp) >= this.EXPIRY_TIME;
@@ -961,10 +969,9 @@
                         return !isExpired;
                     });
                     expired.forEach(item => GM_deleteValue(this.STORAGE_KEY + '_' + item.code));
-                    // init 删除过期项后，立即把精简后的 cacheOrder 落盘一次
                     if (expired.length > 0) {
                         this._orderDirty = true;
-                        this._persistOrder();
+                        this.flushOrder();
                     }
                 } else {
                     state.cacheOrder = [];
@@ -988,10 +995,23 @@
             }
         },
 
+        _isEntryExpired(code, entry) {
+            if (!entry) return true;
+            const now = Date.now();
+            if (entry.isError && entry.errorExpiry && now > entry.errorExpiry) {
+                return true;
+            }
+            const orderItem = state.cacheOrder.find(item => item.code === code);
+            if (orderItem && (now - orderItem.timestamp) >= this.EXPIRY_TIME) {
+                return true;
+            }
+            return false;
+        },
+
         get(code) {
             if (state.javdbCache[code]) {
                 const entry = state.javdbCache[code];
-                if (entry.isError && entry.errorExpiry && Date.now() > entry.errorExpiry) {
+                if (this._isEntryExpired(code, entry)) {
                     this.remove(code);
                     return null;
                 }
@@ -1003,6 +1023,10 @@
                 const cached = GM_getValue(this.STORAGE_KEY + '_' + code, null);
                 if (cached) {
                     const data = typeof cached === 'string' ? JSON.parse(cached) : cached;
+                    if (this._isEntryExpired(code, data)) {
+                        this.remove(code);
+                        return null;
+                    }
                     state.javdbCache[code] = data;
                     this._updateOrder(code);
                     return data;
@@ -1034,7 +1058,6 @@
             }
 
             this._updateOrder(code);
-            this._persistOrder();
         },
 
         _updateOrder(code) {
@@ -1044,11 +1067,23 @@
                 state.cacheOrder.splice(index, 1);
             }
             state.cacheOrder.push({ code, timestamp: now });
-            // 仅标记脏，真正写盘交给 _persistOrder（节流），避免每次 get/set 都全量序列化
             this._orderDirty = true;
+            this._schedulePersistOrder();
         },
 
-        _persistOrder() {
+        _schedulePersistOrder() {
+            if (this._persistTimer) return;
+            this._persistTimer = setTimeout(() => {
+                this._persistTimer = null;
+                this.flushOrder();
+            }, 500);
+        },
+
+        flushOrder() {
+            if (this._persistTimer) {
+                clearTimeout(this._persistTimer);
+                this._persistTimer = null;
+            }
             if (!this._orderDirty) return;
             this._orderDirty = false;
             try {
@@ -1073,7 +1108,7 @@
                 }
             }
             this._orderDirty = true;
-            this._persistOrder();
+            this._schedulePersistOrder();
         },
 
         remove(code) {
@@ -1081,15 +1116,15 @@
             state.cacheOrder = state.cacheOrder.filter(item => item.code !== code);
             GM_deleteValue(this.STORAGE_KEY + '_' + code);
             this._orderDirty = true;
-            this._persistOrder();
+            this._schedulePersistOrder();
         }
     };
 
     // ==================== 条目缓存管理器 (缓存翻页获取到的条目) ====================
     const EntryCacheManager = {
         STORAGE_PREFIX: 'tk_entry_cache_',
-        MAX_ENTRIES: 20,        // 最多保留 20 份不同搜索结果
-        EXPIRY_TIME: 60 * 60 * 1000, // 单份有效期 1 小时
+        MAX_ENTRIES: 20,
+        EXPIRY_TIME: 60 * 60 * 1000,
 
         getKey() {
             const url = new URL(window.location.href);
@@ -1098,6 +1133,7 @@
 
         save(validParsedData, fetchPageNum) {
             const dataToCache = validParsedData.map(d => ({
+                rowKey: d.rowKey,
                 code: d.code,
                 title: d.title,
                 magnet: d.magnet,
@@ -1139,10 +1175,6 @@
             }
         },
 
-        /**
-         * 启动时清理：删除过期 + 超出上限的陈旧条目缓存。
-         * 避免 tk_entry_cache_* key 永久堆积导致 GM 存储膨胀。
-         */
         cleanupStale() {
             if (typeof GM_listValues !== 'function') return;
             try {
@@ -1161,7 +1193,6 @@
                     })
                     .filter(Boolean);
 
-                // 1) 先删过期与损坏的
                 let deletedCount = 0;
                 for (const item of all) {
                     if (item.corrupt || (now - item.timestamp) > this.EXPIRY_TIME) {
@@ -1170,7 +1201,6 @@
                     }
                 }
 
-                // 2) 未过期的按时间倒序，超出上限的最旧条目删掉
                 const live = all
                     .filter(item => !item.corrupt && (now - item.timestamp) <= this.EXPIRY_TIME)
                     .sort((a, b) => b.timestamp - a.timestamp);
@@ -1193,8 +1223,10 @@
 
     // ==================== 请求队列管理 ====================
     const QueueManager = {
-        add(task) {
-            state.requestQueue.push(task);
+        add(code) {
+            if (!code || state.dispatchedCodes.has(code)) return;
+            state.dispatchedCodes.add(code);
+            state.requestQueue.push({ code, retries: 0 });
             this.process();
         },
 
@@ -1238,7 +1270,7 @@
             if (state.isProcessing || state.requestQueue.length === 0) {
                 if (!state.isProcessing && state.requestQueue.length === 0 && typeof App !== 'undefined' && App.showStatusBanner) {
                     const banner = document.getElementById('tk-status-banner');
-                    if (banner && (banner.innerText.includes('正在异步') || banner.innerText.includes('排队加载'))) {
+                    if (banner && (banner.textContent.includes('正在异步') || banner.textContent.includes('排队加载'))) {
                         App.showStatusBanner('封面数据全部加载完成！', true);
                     }
                 }
@@ -1255,11 +1287,30 @@
 
             try {
                 this.recordRequest();
-                await JavDBService.fetchInfo(task.code, task.row);
+                await JavDBService.fetchInfo(task.code, task.retries);
                 this.resetError();
             } catch (e) {
                 console.error('[TorrentKitty] 队列处理错误:', e);
                 this.handleError();
+
+                // 限流或验证码允许退避重试；IP 封禁或超过重试次数则直接落入失败态展示
+                const canRetry = ['RATE_LIMITED', 'CAPTCHA_DETECTED'].includes(e.message)
+                    && task.retries < CONFIG.queue.maxTaskRetries;
+
+                if (canRetry) {
+                    task.retries++;
+                    state.requestQueue.push(task);
+                } else {
+                    const debugInfo = state.debugInfoMap.get(task.code) || JavDBService.createDebugInfo(task.code);
+                    if (!debugInfo.errorMessage) {
+                        debugInfo.errorMessage = e.message || String(e);
+                    }
+                    UIUpdater.updateCode(task.code, debugInfo, {
+                        url: null,
+                        coverId: null,
+                        fallbackLabel: `[${debugInfo.errorMessage}]`
+                    });
+                }
             }
 
             const delay = this.getNextDelay();
@@ -1277,11 +1328,16 @@
             return `https://c0.jdbstatic.com/covers/${prefix}/${coverId}.jpg`;
         },
 
-        async fetchInfo(code, row) {
+        async fetchInfo(code, retryAttempt = 0) {
             const debugInfo = this.createDebugInfo(code);
+            if (retryAttempt > 0) {
+                debugInfo.retryAttempt = retryAttempt;
+            }
+
             const cached = CacheManager.get(code);
             if (cached) {
-                UIUpdater.updateRow(row, code, cached.debugInfo || debugInfo);
+                state.debugInfoMap.set(code, cached.debugInfo || debugInfo);
+                UIUpdater.updateCode(code, cached.debugInfo || debugInfo, cached);
                 return;
             }
 
@@ -1293,12 +1349,12 @@
                 debugInfo.fetchStatus = `HTTP ${response.status} ${response.statusText}`;
 
                 if (response.status === 429) {
-                    debugInfo.errorMessage = '⚠️ 请求过于频繁 (429)';
+                    debugInfo.errorMessage = '请求过于频繁 (429)';
                     throw new Error('RATE_LIMITED');
                 }
 
                 if (response.status === 403) {
-                    debugInfo.errorMessage = '🚫 IP 被封禁 (403)';
+                    debugInfo.errorMessage = 'IP 被封禁 (403)';
                     throw new Error('IP_BANNED');
                 }
 
@@ -1309,7 +1365,7 @@
                 const html = await response.text();
 
                 if (html.includes('cf-challenge') || html.includes('captcha')) {
-                    debugInfo.errorMessage = '🤖 检测到 Cloudflare 挑战/验证码';
+                    debugInfo.errorMessage = '检测到 Cloudflare 挑战/验证码';
                     throw new Error('CAPTCHA_DETECTED');
                 }
 
@@ -1321,30 +1377,42 @@
                     debugInfo.coverId = result.coverId;
                     debugInfo.coverUrl = this.getCoverUrl(result.coverId);
 
-                    CacheManager.set(code, { ...result, debugInfo });
+                    const payload = { ...result, debugInfo };
+                    state.debugInfoMap.set(code, debugInfo);
+                    CacheManager.set(code, payload);
+                    UIUpdater.updateCode(code, debugInfo, payload);
                 } else {
                     debugInfo.errorMessage = '未找到匹配的番号数据';
-                    CacheManager.set(code, { url: null, coverId: null, debugInfo });
+                    const payload = { url: null, coverId: null, debugInfo };
+                    state.debugInfoMap.set(code, debugInfo);
+                    CacheManager.set(code, payload);
+                    UIUpdater.updateCode(code, debugInfo, payload);
                 }
             } catch (error) {
                 debugInfo.errorMessage = debugInfo.errorMessage || error.message || String(error);
+                state.debugInfoMap.set(code, debugInfo);
                 console.error('[TorrentKitty] JavDB 请求出错:', error);
 
-                const isRetryableError = ['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
-
-                if (isRetryableError) {
-                    UIUpdater.updateRow(row, code, debugInfo);
+                const isRateOrBan = ['RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
+                if (isRateOrBan) {
+                    // 实时更新抽屉日志（即使尚未最终放弃，也可在抽屉看到当前状态）
+                    UIUpdater.refreshDrawerLogs(code, debugInfo);
                     throw error;
                 }
 
-                CacheManager.set(code, {
-                    url: null, coverId: null, debugInfo,
+                const payload = {
+                    url: null,
+                    coverId: null,
+                    debugInfo,
                     isError: true,
                     errorExpiry: Date.now() + CONFIG.errorCacheExpiry
+                };
+                CacheManager.set(code, payload);
+                UIUpdater.updateCode(code, debugInfo, {
+                    ...payload,
+                    fallbackLabel: `[拉取失败: ${debugInfo.errorMessage}]`
                 });
             }
-
-            UIUpdater.updateRow(row, code, debugInfo);
         },
 
         createDebugInfo(code) {
@@ -1368,18 +1436,16 @@
             if (firstResult?.getAttribute('href')) {
                 const href = firstResult.getAttribute('href');
 
-                // 校验搜索结果番号是否与期望番号匹配，防止短番号误命中长番号
                 if (expectedCode) {
                     const resultTitle = firstResult.querySelector('.video-title strong, strong');
                     const resultCode = resultTitle ? resultTitle.textContent.trim().toUpperCase() : '';
 
-                    // 去除标点后做全等比对（兼容 AAA-123 与 AAA123 写法）
                     const pureResult = resultCode.replace(/[^A-Z0-9]/ig, '');
                     const pureExpected = expectedCode.toUpperCase().replace(/[^A-Z0-9]/ig, '');
 
-                    // 番号不匹配则当作未找到，避免错误命中
                     if (pureResult && pureExpected && pureResult !== pureExpected) {
-                        const regex = new RegExp(`\\b${expectedCode.toUpperCase()}\\b`, 'i');
+                        const escaped = Utils.escapeRegExp(expectedCode.toUpperCase());
+                        const regex = new RegExp(`\\b${escaped}\\b`, 'i');
                         if (!regex.test(resultCode)) {
                             return null;
                         }
@@ -1401,20 +1467,18 @@
             const code = row.dataset.validCode;
             if (!code) return null;
 
-            const nameEl = row.querySelector('.name') || row.cells[0];
-            const nameText = nameEl ? nameEl.innerText.trim() : '未知标题';
+            const nameEl = row.querySelector('.name') || row.cells?.[0];
+            const nameText = nameEl ? nameEl.textContent.trim() : '未知标题';
 
-            // 获取磁力链
             const magnetEl = row.querySelector('a[href^="magnet:"]');
             const magnet = magnetEl ? magnetEl.href : '';
 
-            // 智能提取大小和发布日期
             let size = '未知大小';
             let date = '未知日期';
-            
+
             if (row.cells && row.cells.length > 0) {
                 for (let i = 0; i < row.cells.length; i++) {
-                    const txt = row.cells[i].innerText.trim();
+                    const txt = (row.cells[i].textContent || '').trim();
                     if (/\d+(\.\d+)?\s*(GB|MB|KB|Bytes)/i.test(txt)) {
                         size = txt;
                     } else if (/\d{4}-\d{2}-\d{2}/.test(txt)) {
@@ -1423,16 +1487,20 @@
                 }
             }
 
-            // 获取页码信息（向下兼容）
-            const pageNum = parseInt(row.dataset.pageNum) || state.currentPageNum || 1;
+            const pageNum = parseInt(row.dataset.pageNum, 10) || state.currentPageNum || 1;
 
-            // 下载链接
-            let downloadBtn = Array.from(row.querySelectorAll('a')).find(el => 
-                el.innerText?.includes('Download') || el.href?.includes('action=download')
+            const downloadBtn = Array.from(row.querySelectorAll('a')).find(el =>
+                el.textContent?.includes('Download') || el.href?.includes('action=download')
             );
             const downloadUrl = downloadBtn ? downloadBtn.href : (magnet || '#');
 
+            if (!row.dataset.rowKey) {
+                state.rowSeq++;
+                row.dataset.rowKey = Utils.buildRowKey(code, magnet, nameText, state.rowSeq);
+            }
+
             return {
+                rowKey: row.dataset.rowKey,
                 code,
                 title: nameText,
                 magnet,
@@ -1440,7 +1508,8 @@
                 date,
                 downloadUrl,
                 pageNum,
-                rowRef: row
+                searchText: Utils.getRowText(row),
+                versionTags: Utils.detectVersionTags(nameText, code)
             };
         }
     };
@@ -1453,12 +1522,10 @@
             const originalTable = App._findResultTable(document);
             if (!originalTable) return;
 
-            // 创建主包装容器
             const root = document.createElement('div');
             root.id = 'tk-modern-grid-root';
             root.className = 'tk-main-container';
 
-            // 创建顶部控制栏 Toolbar
             const toolbar = document.createElement('div');
             toolbar.className = 'tk-modern-toolbar';
             toolbar.innerHTML = `
@@ -1476,13 +1543,11 @@
             `;
             root.appendChild(toolbar);
 
-            // 创建网格容器
             const grid = document.createElement('div');
             grid.id = 'tk-modern-grid';
             grid.className = 'tk-grid-wrapper';
             root.appendChild(grid);
 
-            // 创建抽屉 Detail Drawer 及其 Overlay
             const overlay = document.createElement('div');
             overlay.id = 'tk-drawer-overlay';
             overlay.className = 'tk-drawer-overlay';
@@ -1523,27 +1588,21 @@
             `;
             document.body.appendChild(drawer);
 
-            // 隐藏原表格，插入新主容器
             originalTable.parentNode.insertBefore(root, originalTable);
             originalTable.style.display = 'none';
 
-            // 注册抽屉关闭和遮罩层关闭事件
             overlay.onclick = () => this.closeDrawer();
             document.getElementById('tk-drawer-close-btn').onclick = () => this.closeDrawer();
 
-            // 绑定排除词回车添加事件
             const excInput = document.getElementById('tk-add-exclude-input');
-            excInput.onkeypress = (e) => {
+            excInput.addEventListener('keydown', (e) => {
                 if (e.key === 'Enter') {
                     ExclusionManager.addKeyword(excInput.value);
                     excInput.value = '';
                 }
-            };
+            });
 
-            // 绑定设置按钮
             document.getElementById('tk-btn-config').onclick = () => ModalManager.showSettings();
-            
-            // 同步一次设置的尺寸
             this.syncConfigDimensions();
         },
 
@@ -1559,28 +1618,30 @@
             document.getElementById('tk-drawer-size').textContent = data.size;
             document.getElementById('tk-drawer-date').textContent = data.date;
 
-            // 绑定复制事件
-            document.getElementById('tk-drawer-copy-code').onclick = () => {
-                navigator.clipboard.writeText(data.code).then(() => {
-                    const btn = document.getElementById('tk-drawer-copy-code');
-                    btn.textContent = '✅ 已复制番号';
-                    setTimeout(() => btn.textContent = '📋 复制番号', 1500);
+            const copyCodeBtn = document.getElementById('tk-drawer-copy-code');
+            copyCodeBtn.onclick = () => {
+                Utils.copyText(data.code).then(() => {
+                    copyCodeBtn.textContent = '✅ 已复制番号';
+                    setTimeout(() => { copyCodeBtn.textContent = '📋 复制番号'; }, 1500);
+                }).catch(() => {
+                    alert('复制失败，请手动选中番号复制');
                 });
             };
 
-            document.getElementById('tk-drawer-copy-magnet').onclick = () => {
+            const copyMagnetBtn = document.getElementById('tk-drawer-copy-magnet');
+            copyMagnetBtn.onclick = () => {
                 if (data.magnet) {
-                    navigator.clipboard.writeText(data.magnet).then(() => {
-                        const btn = document.getElementById('tk-drawer-copy-magnet');
-                        btn.textContent = '✅ 已复制磁力链';
-                        setTimeout(() => btn.textContent = '🧲 一键复制磁力链接', 1500);
+                    Utils.copyText(data.magnet).then(() => {
+                        copyMagnetBtn.textContent = '✅ 已复制磁力链';
+                        setTimeout(() => { copyMagnetBtn.textContent = '🧲 一键复制磁力链接'; }, 1500);
+                    }).catch(() => {
+                        alert('复制失败，请手动复制磁力链接');
                     });
                 } else {
                     alert('未获取到磁力链接！');
                 }
             };
 
-            // 展示诊断日志
             const logsPre = document.getElementById('tk-drawer-logs');
             if (debugInfo) {
                 logsPre.textContent = ModalManager.formatDebugInfo(debugInfo);
@@ -1598,10 +1659,11 @@
         }
     };
 
-    // ==================== 3. 卡片工厂 ====================
+    // ==================== 3. 卡片工厂（纯 DOM API 构建，杜绝 XSS & 同番号全展示） ====================
     const CardFactory = {
         createCard(data) {
-            const cardId = `tk-card-${data.code.replace(/[^a-zA-Z0-9-]/g, '')}`;
+            const safeKey = data.rowKey.replace(/[^a-zA-Z0-9_-]/g, '');
+            const cardId = `tk-card-${safeKey}`;
             let card = document.getElementById(cardId);
             if (card) return card;
 
@@ -1609,164 +1671,205 @@
             card.id = cardId;
             card.className = 'tk-media-card';
             card.dataset.code = data.code;
+            card.dataset.rowKey = data.rowKey;
+            card.dataset.searchText = data.searchText || `${data.code} ${data.title} ${data.size} ${data.date}`;
 
-            card.innerHTML = `
-                <div class="tk-card-cover-wrapper">
-                    <div class="tk-skeleton" id="${cardId}-skeleton"></div>
-                    <img class="tk-cover-img" id="${cardId}-img" alt="Cover">
-                    <div class="tk-cover-fallback" id="${cardId}-fallback" style="display: none;">[可能需代理/未收录]</div>
-                </div>
-                <div class="tk-card-content">
-                    <div class="tk-card-header">
-                        <span class="tk-card-code">${data.code}</span>
-                        <span class="tk-card-meta">${data.size}</span>
-                    </div>
-                    <div class="tk-card-title" title="${data.title}">${data.title}</div>
-                    <div class="tk-card-meta" style="margin-top: -4px;">📅 ${data.date}</div>
-                    <div class="tk-card-actions">
-                        <span class="tk-btn-modern tk-btn-magnet" id="${cardId}-magnet-btn">🧲 复制磁力</span>
-                        <a href="https://missav.ws/cn/${data.code}" target="_blank" class="tk-btn-modern tk-btn-missav">▶ MissAV</a>
-                        <a href="#" target="_blank" class="tk-btn-modern tk-btn-javdb disabled" id="${cardId}-javdb-btn">🔗 JavDB</a>
-                    </div>
-                </div>
-            `;
+            // 封面区
+            const coverWrapper = document.createElement('div');
+            coverWrapper.className = 'tk-card-cover-wrapper';
 
-            // 点击整个卡片（除操作按钮外）展示侧边抽屉
-            card.onclick = () => {
-                let debugInfo = null;
-                const coverContainer = data.rowRef.querySelector('.javdb-cover-container');
-                if (coverContainer && coverContainer.dataset.debugInfo) {
-                    try {
-                        debugInfo = JSON.parse(coverContainer.dataset.debugInfo);
-                    } catch(e){}
-                }
-                GridContainer.showDrawer(data, debugInfo);
-            };
+            const skeleton = document.createElement('div');
+            skeleton.className = 'tk-skeleton';
 
-            // 绑定复制磁力按钮事件
-            const magnetBtn = card.querySelector(`#${cardId}-magnet-btn`);
-            if (magnetBtn) {
-                magnetBtn.onclick = (e) => {
-                    e.stopPropagation();
-                    if (data.magnet) {
-                        navigator.clipboard.writeText(data.magnet).then(() => {
-                            const originalText = magnetBtn.innerHTML;
-                            magnetBtn.innerHTML = '✅ 已复制';
-                            setTimeout(() => { magnetBtn.innerHTML = originalText; }, 1500);
-                        }).catch(() => {
-                            alert('复制失败，请在详情抽屉中手动复制');
-                        });
-                    } else {
-                        alert('未获取到磁力链接！');
-                    }
-                };
-            }
+            const img = document.createElement('img');
+            img.className = 'tk-cover-img';
+            img.alt = data.code;
 
-            // MissAV / JavDB 按钮：点击不应触发卡片整体的抽屉点击事件
-            const missavAnchor = card.querySelector('.tk-btn-missav');
-            if (missavAnchor) {
-                missavAnchor.addEventListener('click', (e) => e.stopPropagation());
-            }
-            // JavDB 按钮初始为 disabled，stopPropagation 在此处兜底；URL/状态由 UIUpdater 接管
-            const javdbAnchor = card.querySelector(`#${cardId}-javdb-btn`);
-            if (javdbAnchor) {
-                javdbAnchor.addEventListener('click', (e) => {
-                    e.stopPropagation();
-                    if (javdbAnchor.classList.contains('disabled')) {
-                        e.preventDefault();
-                    }
+            const fallback = document.createElement('div');
+            fallback.className = 'tk-cover-fallback';
+            fallback.style.display = 'none';
+            fallback.textContent = '[可能需代理/未收录]';
+
+            coverWrapper.append(skeleton, img, fallback);
+
+            // 版本角标（AI无码 / 破解无码 / 中字）
+            if (data.versionTags && data.versionTags.length > 0) {
+                const badgeWrap = document.createElement('div');
+                badgeWrap.className = 'tk-ver-badges';
+                data.versionTags.forEach(tag => {
+                    const span = document.createElement('span');
+                    span.className = `tk-ver-tag tk-ver-${tag.type}`;
+                    span.textContent = tag.label;
+                    badgeWrap.appendChild(span);
                 });
+                coverWrapper.appendChild(badgeWrap);
+            }
+
+            // 内容区
+            const content = document.createElement('div');
+            content.className = 'tk-card-content';
+
+            const header = document.createElement('div');
+            header.className = 'tk-card-header';
+
+            const codeSpan = document.createElement('span');
+            codeSpan.className = 'tk-card-code';
+            codeSpan.textContent = data.code;
+
+            const sizeSpan = document.createElement('span');
+            sizeSpan.className = 'tk-card-meta';
+            sizeSpan.textContent = data.size;
+
+            header.append(codeSpan, sizeSpan);
+
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'tk-card-title';
+            titleDiv.title = data.title;
+            titleDiv.textContent = data.title;
+
+            const dateDiv = document.createElement('div');
+            dateDiv.className = 'tk-card-meta';
+            dateDiv.style.marginTop = '-4px';
+            dateDiv.textContent = `📅 ${data.date}`;
+
+            // 底部按钮区
+            const actions = document.createElement('div');
+            actions.className = 'tk-card-actions';
+
+            const magnetBtn = document.createElement('span');
+            magnetBtn.className = 'tk-btn-modern tk-btn-magnet';
+            magnetBtn.textContent = '🧲 复制磁力';
+            magnetBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (data.magnet) {
+                    Utils.copyText(data.magnet).then(() => {
+                        magnetBtn.textContent = '✅ 已复制';
+                        setTimeout(() => { magnetBtn.textContent = '🧲 复制磁力'; }, 1500);
+                    }).catch(() => {
+                        alert('复制失败，请在详情抽屉中手动复制');
+                    });
+                } else {
+                    alert('未获取到磁力链接！');
+                }
+            });
+
+            const missavAnchor = document.createElement('a');
+            missavAnchor.href = `https://missav.ws/cn/${encodeURIComponent(data.code)}`;
+            missavAnchor.target = '_blank';
+            missavAnchor.rel = 'noopener noreferrer';
+            missavAnchor.className = 'tk-btn-modern tk-btn-missav';
+            missavAnchor.textContent = '▶ MissAV';
+            missavAnchor.addEventListener('click', (e) => e.stopPropagation());
+
+            const javdbAnchor = document.createElement('a');
+            javdbAnchor.href = '#';
+            javdbAnchor.target = '_blank';
+            javdbAnchor.rel = 'noopener noreferrer';
+            javdbAnchor.className = 'tk-btn-modern tk-btn-javdb disabled';
+            javdbAnchor.textContent = '🔗 JavDB';
+            javdbAnchor.addEventListener('click', (e) => {
+                e.stopPropagation();
+                if (javdbAnchor.classList.contains('disabled')) {
+                    e.preventDefault();
+                }
+            });
+
+            actions.append(magnetBtn, missavAnchor, javdbAnchor);
+            content.append(header, titleDiv, dateDiv, actions);
+            card.append(coverWrapper, content);
+
+            // 点击整个卡片展示右侧抽屉
+            card.addEventListener('click', () => {
+                const debugInfo = state.debugInfoMap.get(data.code) || null;
+                GridContainer.showDrawer(data, debugInfo);
+            });
+
+            // 如果该番号已有缓存或已有结果，立刻同步到新卡片
+            const cached = CacheManager.get(data.code);
+            if (cached) {
+                UIUpdater.applyToCard(card, cached.debugInfo || state.debugInfoMap.get(data.code) || {}, cached);
             }
 
             return card;
         }
     };
 
-    // ==================== 4. UI更新器 ====================
+    // ==================== 4. UI 更新器 ====================
     const UIUpdater = {
-        updateRow(row, code, debugInfo) {
-            const cache = CacheManager.get(code);
-            if (!cache) return;
+        PLACEHOLDER_FAILED: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%239B3B2A' text-anchor='middle' dy='.3em'%3E%E5%9B%BE%E5%8A%A0%E8%BD%BD%E5%A4%B1%E8%B4%A5%3C/text%3E%3C/svg%3E",
+        PLACEHOLDER_EMPTY: "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%233D3226' text-anchor='middle' dy='.3em'%3E%E6%9C%AA%E6%94%B6%E5%BD%95%3C/text%3E%3C/svg%3E",
 
-            const { url, coverId } = cache;
+        /**
+         * 将封面与 JavDB 链接同步到所有同番号卡片
+         */
+        updateCode(code, debugInfo, result) {
+            const payload = result || CacheManager.get(code);
+            if (!payload) return;
 
-            // 更新 tr 属性（向下兼容）
-            const originalCoverContainer = row.querySelector('.javdb-cover-container');
-            if (originalCoverContainer) {
-                originalCoverContainer.dataset.debugInfo = JSON.stringify(debugInfo);
-            }
-            const originalJavdbBtn = row.querySelector('.javdb-btn');
-            if (originalJavdbBtn) {
-                this.updateJavDBButton(originalJavdbBtn, url);
-            }
+            const cards = document.querySelectorAll(`.tk-media-card[data-code="${CSS.escape(code)}"]`);
+            cards.forEach(card => this.applyToCard(card, debugInfo, payload));
 
-            // 同步更新现代化卡片
-            const cardId = `tk-card-${code.replace(/[^a-zA-Z0-9-]/g, '')}`;
-            const card = document.getElementById(cardId);
-            if (card) {
-                const img = document.getElementById(`${cardId}-img`);
-                const skeleton = document.getElementById(`${cardId}-skeleton`);
-                const fallback = document.getElementById(`${cardId}-fallback`);
-                const javdbBtn = document.getElementById(`${cardId}-javdb-btn`);
+            this.refreshDrawerLogs(code, debugInfo);
+        },
 
-                if (javdbBtn) {
-                    if (url) {
-                         javdbBtn.href = url;
-                         javdbBtn.classList.remove('disabled');
-                         javdbBtn.onclick = (e) => e.stopPropagation();
-                    } else {
-                         javdbBtn.classList.add('disabled');
-                         javdbBtn.onclick = (e) => { e.preventDefault(); e.stopPropagation(); };
-                    }
+        applyToCard(card, debugInfo, payload) {
+            const { url, coverId, fallbackLabel } = payload;
+            const img = card.querySelector('.tk-cover-img');
+            const skeleton = card.querySelector('.tk-skeleton');
+            const fallback = card.querySelector('.tk-cover-fallback');
+            const javdbBtn = card.querySelector('.tk-btn-javdb');
+
+            if (javdbBtn) {
+                if (url) {
+                    javdbBtn.href = url;
+                    javdbBtn.classList.remove('disabled');
+                } else {
+                    javdbBtn.href = '#';
+                    javdbBtn.classList.add('disabled');
                 }
+            }
 
-                if (img && skeleton) {
-                    if (coverId) {
-                        const coverUrl = JavDBService.getCoverUrl(coverId);
-                        img.src = coverUrl;
-                        img.onload = () => {
-                            debugInfo.imageLoadSuccess = true;
-                            img.classList.add('loaded');
-                            skeleton.style.display = 'none';
-                        };
-                        img.onerror = () => {
-                            // 用 URL 编码明文 SVG 作占位图，避免 base64 中文字符损坏
-                            debugInfo.imageLoadSuccess = false;
-                            img.onerror = null;
-                            img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%239B3B2A' text-anchor='middle' dy='.3em'%3E%E5%9B%BE%E5%8A%A0%E8%BD%BD%E5%A4%B1%E8%B4%A5%3C/text%3E%3C/svg%3E";
-                            img.classList.add('loaded');
-                            skeleton.style.display = 'none';
-                            if (fallback) fallback.style.display = 'block';
-                        };
-                    } else {
-                        // 未收录
-                        img.src = "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='100' height='150'%3E%3Crect width='100%25' height='100%25' fill='%23D4B895'/%3E%3Ctext x='50%25' y='50%25' font-family='monospace' font-size='12' fill='%233D3226' text-anchor='middle' dy='.3em'%3E%E6%9C%AA%E6%94%B6%E5%BD%95%3C/text%3E%3C/svg%3E";
-                        debugInfo.imageLoadSuccess = false;
+            if (img && skeleton) {
+                if (coverId) {
+                    const coverUrl = JavDBService.getCoverUrl(coverId);
+                    img.onload = () => {
+                        if (debugInfo) debugInfo.imageLoadSuccess = true;
                         img.classList.add('loaded');
                         skeleton.style.display = 'none';
+                        if (fallback) fallback.style.display = 'none';
+                    };
+                    img.onerror = () => {
+                        if (debugInfo) debugInfo.imageLoadSuccess = false;
+                        img.onerror = null;
+                        img.src = this.PLACEHOLDER_FAILED;
+                        img.classList.add('loaded');
+                        skeleton.style.display = 'none';
+                        if (fallback) {
+                            fallback.textContent = fallbackLabel || '[可能需代理/图片加载失败]';
+                            fallback.style.display = 'block';
+                        }
+                    };
+                    img.src = coverUrl;
+                } else {
+                    img.src = fallbackLabel ? this.PLACEHOLDER_FAILED : this.PLACEHOLDER_EMPTY;
+                    if (debugInfo) debugInfo.imageLoadSuccess = false;
+                    img.classList.add('loaded');
+                    skeleton.style.display = 'none';
+                    if (fallback && fallbackLabel) {
+                        fallback.textContent = fallbackLabel;
+                        fallback.style.display = 'block';
                     }
-                }
-            }
-
-            // 更新已开启抽屉的日志
-            const activeDrawerCode = document.getElementById('tk-drawer-code');
-            if (activeDrawerCode && activeDrawerCode.textContent === code) {
-                const logsPre = document.getElementById('tk-drawer-logs');
-                if (logsPre) {
-                    logsPre.textContent = ModalManager.formatDebugInfo(debugInfo);
                 }
             }
         },
 
-        updateJavDBButton(btn, url) {
-            if (!btn) return;
-            if (url) {
-                btn.href = url;
-                btn.innerText = '🔗 JavDB';
-            } else {
-                btn.innerText = 'Ø 无详情';
-                btn.href = '#';
-                btn.onclick = (e) => e.preventDefault();
+        refreshDrawerLogs(code, debugInfo) {
+            const activeDrawerCode = document.getElementById('tk-drawer-code');
+            if (activeDrawerCode && activeDrawerCode.textContent === code) {
+                const logsPre = document.getElementById('tk-drawer-logs');
+                if (logsPre && debugInfo) {
+                    logsPre.textContent = ModalManager.formatDebugInfo(debugInfo);
+                }
             }
         },
 
@@ -1790,62 +1893,23 @@
             return overlay;
         },
 
-        createButton(text, color, onClick) {
+        createButton(text, onClick) {
             const btn = document.createElement('button');
-            btn.innerText = text;
+            btn.textContent = text;
             btn.className = 'tk-toolbar-btn';
             btn.style.margin = '0 0 0 8px';
             if (onClick) btn.onclick = onClick;
             return btn;
         },
 
-        showDebugInfo(debugInfo) {
-            const info = this.formatDebugInfo(debugInfo);
-
-            const modal = document.createElement('div');
-            modal.style.cssText = StyleUtils.modal({ maxWidth: '600px' });
-
-            const title = document.createElement('h3');
-            title.textContent = '运行诊断日志';
-            title.style.margin = '0 0 16px 0';
-            title.style.color = '#2A2118';
-
-            const textarea = document.createElement('textarea');
-            textarea.value = info;
-            textarea.readOnly = true;
-            textarea.style.cssText = `
-                width: 100%;
-                height: 300px;
-                font-family: var(--tk-font-mono);
-                font-size: 12px;
-                padding: 12px;
-                background: #E8DCC7;
-                border: 1px solid rgba(61, 50, 38, 0.15);
-                border-radius: 8px;
-                color: #3D3226;
-                resize: none;
-                box-sizing: border-box;
-            `;
-
-            const buttonContainer = document.createElement('div');
-            buttonContainer.style.cssText = 'margin-top: 16px; display: flex; justify-content: flex-end;';
-
-            const closeBtn = this.createButton('关闭', COLORS.neutral);
-            buttonContainer.appendChild(closeBtn);
-
-            modal.append(title, textarea, buttonContainer);
-            const overlay = this.createOverlay(modal);
-
-            closeBtn.onclick = () => overlay.remove();
-        },
-
         formatDebugInfo(debugInfo) {
+            const retryLine = debugInfo.retryAttempt ? `\n[+] 重试轮次: 第 ${debugInfo.retryAttempt} 次` : '';
             return `>> SYSTEM DIAGNOSTICS: JAVDB MODULE
 ============================================================
 [+] 番号: ${debugInfo.code}
 [+] 时间戳: ${debugInfo.timestamp}
 [+] 请求地址: ${debugInfo.fetchUrl}
-[+] HTTP 状态: ${debugInfo.fetchStatus}
+[+] HTTP 状态: ${debugInfo.fetchStatus}${retryLine}
 [+] 命中成功: ${debugInfo.foundResult ? '[ 是 ]' : '[ 否 ]'}
 [+] JavDB 地址: ${debugInfo.javdbUrl || '无'}
 [+] 封面 ID: ${debugInfo.coverId || '无'}
@@ -1864,16 +1928,16 @@
                     <div style="margin-bottom: 20px;">
                         <label style="display: flex; justify-content: space-between; font-size: 13px; color: var(--tk-text-muted); margin-bottom: 8px;">
                             <span>页面版面最大宽度</span>
-                            <span style="color: var(--tk-moss); font-weight: 700;"><span id="page-width-value">${state.settings.pageMaxWidth || 1200}</span> PX</span>
+                            <span style="color: var(--tk-moss); font-weight: 700;"><span id="page-width-value">${state.settings.pageMaxWidth || CONFIG.defaults.pageMaxWidth}</span> PX</span>
                         </label>
-                        <input type="range" id="page-width-slider" class="tk-slider" min="1000" max="1800" step="50" value="${state.settings.pageMaxWidth || 1200}">
+                        <input type="range" id="page-width-slider" class="tk-slider" min="1000" max="1800" step="50" value="${state.settings.pageMaxWidth || CONFIG.defaults.pageMaxWidth}">
                     </div>
                     <div style="margin-bottom: 20px;">
                         <label style="display: flex; justify-content: space-between; font-size: 13px; color: var(--tk-text-muted); margin-bottom: 8px;">
                             <span>自动翻页加载最大页数</span>
-                            <span style="color: var(--tk-accent-pink); font-weight: 700;"><span id="pages-value">${state.settings.maxPagesToFetch || 10}</span> 页</span>
+                            <span style="color: var(--tk-accent-pink); font-weight: 700;"><span id="pages-value">${state.settings.maxPagesToFetch || CONFIG.defaults.maxPagesToFetch}</span> 页</span>
                         </label>
-                        <input type="range" id="pages-slider" class="tk-slider" min="1" max="30" value="${state.settings.maxPagesToFetch || 10}">
+                        <input type="range" id="pages-slider" class="tk-slider" min="1" max="30" value="${state.settings.maxPagesToFetch || CONFIG.defaults.maxPagesToFetch}">
                     </div>
                     <div>
                         <label style="display: flex; justify-content: space-between; font-size: 13px; color: var(--tk-text-muted); margin-bottom: 8px;">
@@ -1887,7 +1951,7 @@
             `;
 
             const overlay = this.createOverlay(panel);
-            
+
             const pageWidthSlider = panel.querySelector('#page-width-slider');
             const pageWidthValue = panel.querySelector('#page-width-value');
             const pagesSlider = panel.querySelector('#pages-slider');
@@ -1896,69 +1960,44 @@
             const widthValue = panel.querySelector('#width-value');
             const buttonsContainer = panel.querySelector('#settings-buttons');
 
-            pageWidthSlider.oninput = () => {
-                pageWidthValue.textContent = pageWidthSlider.value;
-            };
+            pageWidthSlider.oninput = () => { pageWidthValue.textContent = pageWidthSlider.value; };
+            pagesSlider.oninput = () => { pagesValue.textContent = pagesSlider.value; };
+            widthSlider.oninput = () => { widthValue.textContent = widthSlider.value; };
 
-            pagesSlider.oninput = () => {
-                pagesValue.textContent = pagesSlider.value;
-            };
-
-            widthSlider.oninput = () => {
-                widthValue.textContent = widthSlider.value;
-            };
-
-            const resetBtn = this.createButton('重置', COLORS.neutral, () => {
-                pageWidthSlider.value = 1200;
-                pageWidthValue.textContent = 1200;
-                pagesSlider.value = 10;
-                pagesValue.textContent = 10;
-                widthSlider.value = 280;
-                widthValue.textContent = 280;
+            const resetBtn = this.createButton('重置', () => {
+                pageWidthSlider.value = CONFIG.defaults.pageMaxWidth;
+                pageWidthValue.textContent = CONFIG.defaults.pageMaxWidth;
+                pagesSlider.value = CONFIG.defaults.maxPagesToFetch;
+                pagesValue.textContent = CONFIG.defaults.maxPagesToFetch;
+                widthSlider.value = CONFIG.defaults.coverWidth;
+                widthValue.textContent = CONFIG.defaults.coverWidth;
             });
 
-            const saveBtn = this.createButton('保存', COLORS.primary, () => {
-                state.settings.pageMaxWidth = parseInt(pageWidthSlider.value);
-                state.settings.maxPagesToFetch = parseInt(pagesSlider.value);
-                state.settings.coverWidth = parseInt(widthSlider.value);
-                state.settings.coverHeight = Math.round(parseInt(widthSlider.value) * 0.75); 
+            const saveBtn = this.createButton('保存', () => {
+                state.settings.pageMaxWidth = parseInt(pageWidthSlider.value, 10);
+                state.settings.maxPagesToFetch = parseInt(pagesSlider.value, 10);
+                state.settings.coverWidth = parseInt(widthSlider.value, 10);
                 SettingsManager.save();
                 UIUpdater.updateAllCovers();
                 overlay.remove();
             });
 
-            buttonsContainer.appendChild(resetBtn);
-            buttonsContainer.appendChild(saveBtn);
+            buttonsContainer.append(resetBtn, saveBtn);
         }
     };
 
-    // ==================== 6. 按钮工厂 ====================
-    const ButtonFactory = {
-        createLinkButton(text, href, color, className) {
-            const btn = document.createElement('a');
-            btn.href = href;
-            btn.target = '_blank';
-            btn.innerText = text;
-            btn.className = `${className} tk-btn-hover`;
-            btn.style.cssText = StyleUtils.buttonBase(color, { margin: '0 0 0 8px' });
-            return btn;
-        },
-
-        createSettingsButton() {
-            // 整合入 Toolbar，浮动按钮无操作
-        }
-    };
-
-    // ==================== 7. 排除关键字管理器 ====================
+    // ==================== 6. 排除关键字管理器 ====================
     const ExclusionManager = {
         init() {
             this.updateList();
         },
+
         saveKeywords() {
             if (typeof GM_setValue === 'function') {
                 GM_setValue('tk_exclude_keywords', state.excludeKeywords);
             }
         },
+
         addKeyword(kw) {
             kw = kw.trim();
             if (kw && !state.excludeKeywords.includes(kw)) {
@@ -1968,59 +2007,64 @@
                 this.applyExclusion();
             }
         },
+
         removeKeyword(kw) {
             state.excludeKeywords = state.excludeKeywords.filter(k => k !== kw);
             this.saveKeywords();
             this.updateList();
             this.applyExclusion();
         },
+
+        isTextExcluded(text) {
+            if (!text || state.excludeKeywords.length === 0) return false;
+            return state.excludeKeywords.some(kw => kw && text.includes(kw));
+        },
+
         applyExclusion() {
             const cards = document.querySelectorAll('.tk-media-card');
             cards.forEach(card => {
-                const code = card.dataset.code;
-                const trs = Array.from(document.querySelectorAll('table tr'));
-                const matchedTr = trs.find(t => t.dataset.validCode === code);
-                if (matchedTr) {
-                    const isExcluded = state.excludeKeywords.some(kw => kw && matchedTr.innerText.includes(kw));
-                    if (isExcluded) {
-                        card.style.display = 'none';
-                        matchedTr.style.display = 'none';
-                        matchedTr.dataset.excluded = 'true';
-                    } else {
-                        card.style.display = '';
-                        matchedTr.style.display = '';
-                        delete matchedTr.dataset.excluded;
-                    }
+                const searchText = card.dataset.searchText || '';
+                const isExcluded = this.isTextExcluded(searchText);
+                card.style.display = isExcluded ? 'none' : '';
+                card.dataset.excluded = isExcluded ? 'true' : 'false';
+            });
+
+            // 同步更新隐藏行的排除状态，保留 validCode 以便随时恢复
+            const rows = App.getResultRows();
+            rows.forEach(row => {
+                if (!row.dataset.validCode) return;
+                const isExcluded = this.isTextExcluded(Utils.getRowText(row));
+                if (isExcluded) {
+                    row.dataset.excluded = 'true';
+                } else {
+                    delete row.dataset.excluded;
                 }
             });
 
-            if (typeof App !== 'undefined') {
-                App.processRows();
-            }
+            App.updateVisibleCount();
+            App.checkPaginationAndDispatch();
         },
+
         updateList() {
             const container = document.getElementById('tk-exclude-tags-container');
             if (!container) return;
-            container.innerHTML = '';
+            container.textContent = '';
+
             state.excludeKeywords.forEach(kw => {
                 const tag = document.createElement('span');
                 tag.className = 'tk-tag';
-                tag.innerHTML = `
-                    🛡️ ${kw}
-                    <span class="tk-tag-del" data-kw="${kw}">×</span>
-                `;
-                tag.querySelector('.tk-tag-del').onclick = () => {
-                    this.removeKeyword(kw);
-                };
+
+                const labelSpan = document.createElement('span');
+                labelSpan.textContent = `🛡️ ${kw}`;
+
+                const delSpan = document.createElement('span');
+                delSpan.className = 'tk-tag-del';
+                delSpan.textContent = '×';
+                delSpan.addEventListener('click', () => this.removeKeyword(kw));
+
+                tag.append(labelSpan, delSpan);
                 container.appendChild(tag);
             });
-        }
-    };
-
-    // ==================== 8. 原站按钮美化 ====================
-    const OriginalButtonStyler = {
-        style() {
-            // 已完全隐藏表格，无额外原站按钮美化
         }
     };
 
@@ -2029,34 +2073,35 @@
         createVirtualRow(data) {
             const tr = document.createElement('tr');
             tr.dataset.validCode = data.code;
+            if (data.rowKey) tr.dataset.rowKey = data.rowKey;
             tr.dataset.isVirtual = 'true';
             tr.dataset.pageNum = data.pageNum || 1;
             tr.style.display = 'none';
 
             const tdName = document.createElement('td');
             tdName.className = 'name';
-            tdName.innerText = data.title;
+            tdName.textContent = data.title;
             tr.appendChild(tdName);
 
             const tdSize = document.createElement('td');
-            tdSize.innerText = data.size;
+            tdSize.textContent = data.size;
             tr.appendChild(tdSize);
 
             const tdDate = document.createElement('td');
-            tdDate.innerText = data.date;
+            tdDate.textContent = data.date;
             tr.appendChild(tdDate);
 
             const tdAction = document.createElement('td');
             tdAction.className = 'action';
-            
+
             const aMagnet = document.createElement('a');
             aMagnet.href = data.magnet;
-            aMagnet.innerText = 'Magnet';
+            aMagnet.textContent = 'Magnet';
             tdAction.appendChild(aMagnet);
 
             const aDownload = document.createElement('a');
             aDownload.href = data.downloadUrl;
-            aDownload.innerText = 'Download';
+            aDownload.textContent = 'Download';
             tdAction.appendChild(aDownload);
 
             tr.appendChild(tdAction);
@@ -2064,7 +2109,9 @@
         },
 
         _findResultTable(doc = document) {
-            return doc.querySelector('table#archiveResult') || doc.querySelector('table.results') || doc.querySelector('.search-results table');
+            return doc.querySelector('table#archiveResult')
+                || doc.querySelector('table.results')
+                || doc.querySelector('.search-results table');
         },
 
         getResultRows(doc = document) {
@@ -2076,7 +2123,7 @@
             return trs.filter(tr => {
                 const hasMagnet = tr.querySelector('a[href^="magnet:"]');
                 const hasDownload = Array.from(tr.querySelectorAll('a, input, button')).some(el =>
-                    (el.innerText?.includes('Download')) || el.value === 'Download'
+                    (el.textContent?.includes('Download')) || el.value === 'Download'
                 );
                 return hasMagnet || hasDownload;
             });
@@ -2095,11 +2142,11 @@
             const url = new URL(window.location.href);
             const pathParts = url.pathname.split('/').filter(Boolean);
             if (pathParts[0] === 'search' && pathParts[1]) {
-                return parseInt(pathParts[2]) || 1;
+                return parseInt(pathParts[2], 10) || 1;
             }
             const activePageEl = document.querySelector('.pagination .active, .pagination strong, .pages .current');
             if (activePageEl) {
-                const num = parseInt(activePageEl.innerText);
+                const num = parseInt(activePageEl.textContent, 10);
                 if (!isNaN(num)) return num;
             }
             return 1;
@@ -2147,53 +2194,44 @@
 
             resultRows.forEach(row => {
                 try {
-                    const rowText = row.innerText;
-                    
-                    const isExcluded = state.excludeKeywords.some(kw => kw && rowText.includes(kw));
-                    if (isExcluded) {
-                        row.style.display = 'none';
-                        row.dataset.excluded = 'true';
-                        delete row.dataset.validCode;
-                        state.requestQueue = state.requestQueue.filter(task => task.row !== row);
-                        return;
-                    }
-                    
-                    if (row.dataset.excluded === 'true') {
-                        row.style.display = 'none';
-                        delete row.dataset.excluded;
-                    }
+                    const rowText = Utils.getRowText(row);
 
-                    if (row.dataset.validCode) {
-                        const data = DataParser.parseRow(row);
-                        if (data) validParsedData.push(data);
-                        return;
-                    }
-
-                    const match = rowText.match(CONFIG.codeRegex);
-                    if (match) {
+                    if (!row.dataset.validCode) {
+                        const match = rowText.match(CONFIG.codeRegex);
+                        if (!match) {
+                            row.style.display = 'none';
+                            return;
+                        }
                         let code = (match[1] || match[2]).toUpperCase();
                         if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
                             code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
                         }
                         row.dataset.validCode = code;
-                        
-                        const data = DataParser.parseRow(row);
-                        if (data) validParsedData.push(data);
+                    }
+
+                    const isExcluded = ExclusionManager.isTextExcluded(rowText);
+                    if (isExcluded) {
+                        row.dataset.excluded = 'true';
                     } else {
-                        row.style.display = 'none';
+                        delete row.dataset.excluded;
+                    }
+
+                    const data = DataParser.parseRow(row);
+                    if (data) {
+                        data.isExcluded = isExcluded;
+                        validParsedData.push(data);
                     }
                 } catch (e) {
                     console.error('[TorrentKitty] 处理行时出错:', e, row);
                 }
             });
 
-            // 渲染网格
+            // 渲染网格（所有有效资源均保留展示，排除项仅隐藏而非销毁）
             const grid = document.getElementById('tk-modern-grid');
             if (grid) {
                 let lastRowPageNum = null;
-                
+
                 validParsedData.forEach(data => {
-                    // 如果页码发生变化，且不是首个页码，则在网格流中在此处追加对应的页码分割线
                     if (lastRowPageNum !== null && data.pageNum !== lastRowPageNum) {
                         const markerId = `tk-page-marker-${data.pageNum}`;
                         if (!document.getElementById(markerId)) {
@@ -2207,23 +2245,22 @@
                     lastRowPageNum = data.pageNum;
 
                     const card = CardFactory.createCard(data);
-                    if (card && card.parentNode !== grid) {
-                        grid.appendChild(card);
+                    if (card) {
+                        card.style.display = data.isExcluded ? 'none' : '';
+                        card.dataset.excluded = data.isExcluded ? 'true' : 'false';
+                        if (card.parentNode !== grid) {
+                            grid.appendChild(card);
+                        }
                     }
                 });
             }
 
-            // 更新计数器
-            const totalCountBadge = document.getElementById('tk-total-count');
-            if (totalCountBadge) {
-                totalCountBadge.textContent = `${this.getValidRowsCount()} 条项目`;
-            }
+            this.updateVisibleCount();
 
             // 保存条目列表缓存
             EntryCacheManager.save(validParsedData, state.fetchPageNum);
 
-            // #5 优化：首次解析完已知行后，立刻派发一次队列，
-            // 让现有番号的封面请求与后续翻页并行进行，避免翻页期间界面一直空白。
+            // 首次解析完已知行后立刻派发队列，让现有番号封面与后续翻页并行
             if (!hadProcessedBefore) {
                 state.hadProcessedRows = true;
                 this.dispatchQueue();
@@ -2232,62 +2269,21 @@
             this.checkPaginationAndDispatch();
         },
 
-        enhanceRow(row, code) {
-            // 保留 tr 中的 enhancement 标记（向下兼容与数据一致）
-            let targetBtn = Array.from(row.querySelectorAll('a, input, button')).find(el =>
-                (el.innerText?.includes('Download')) || el.value === 'Download'
-            );
-
-            if (!targetBtn) {
-                targetBtn = row.querySelector('a[href^="magnet:"]');
-            }
-
-            if (!targetBtn) return;
-
-            const parent = targetBtn.parentNode;
-
-            const missavBtn = ButtonFactory.createLinkButton(
-                '▶ MissAV',
-                `https://missav.ws/cn/${code}`,
-                COLORS.pink,
-                'missav-btn'
-            );
-            parent.insertBefore(missavBtn, targetBtn.nextSibling);
-
-            const javdbBtn = ButtonFactory.createLinkButton(
-                '⏳ 加载中...',
-                '#',
-                COLORS.neutral,
-                'javdb-btn'
-            );
-            parent.insertBefore(javdbBtn, missavBtn.nextSibling);
-
-            const coverContainer = document.createElement('div');
-            coverContainer.className = 'javdb-cover-container';
-            coverContainer.style.display = 'none'; // 保持隐藏，仅存放 debugInfo 元数据
-            parent.appendChild(coverContainer);
-
-            row.dataset.enhanced = 'true';
-
-            const cached = CacheManager.get(code);
-            if (cached) {
-                UIUpdater.updateRow(row, code, cached.debugInfo || {});
-                return;
-            }
-
-            QueueManager.add({ code, row });
+        /**
+         * 严格以实际可见卡片数量为准，杜绝计数与页面脱节
+         */
+        getVisibleCardsCount() {
+            return document.querySelectorAll('.tk-media-card:not([data-excluded="true"])').length;
         },
 
-        getValidRowsCount() {
-            return document.querySelectorAll('tr[data-valid-code]').length;
+        updateVisibleCount() {
+            const totalCountBadge = document.getElementById('tk-total-count');
+            if (totalCountBadge) {
+                totalCountBadge.textContent = `${this.getVisibleCardsCount()} 条项目`;
+            }
         },
 
         showStatusBanner(text, showContinueBtn = false) {
-            if (state.bannerTimeout) {
-                clearTimeout(state.bannerTimeout);
-                state.bannerTimeout = null;
-            }
-
             let banner = document.getElementById('tk-status-banner');
             if (!banner) {
                 banner = document.createElement('div');
@@ -2315,17 +2311,19 @@
                 }
             }
 
-            banner.innerHTML = '';
+            banner.textContent = '';
             const textSpan = document.createElement('span');
             textSpan.textContent = text;
             banner.appendChild(textSpan);
-            
+
             if (showContinueBtn) {
                 const btn = document.createElement('button');
-                btn.innerText = '加载更多';
+                btn.textContent = '加载更多';
                 btn.className = 'tk-toolbar-btn';
                 btn.onclick = () => {
-                    state.targetValidCount = this.getValidRowsCount() + 8;
+                    state.pageRetryCount = 0;
+                    state.consecutiveEmptyPages = 0;
+                    state.targetValidCount = this.getVisibleCardsCount() + 8;
                     this.showStatusBanner('正在拉取数据...', false);
                     this.checkPaginationAndDispatch();
                 };
@@ -2336,53 +2334,41 @@
             banner.style.opacity = '1';
         },
 
-        hideStatusBanner(delay = 0) {
-            if (state.bannerTimeout) {
-                clearTimeout(state.bannerTimeout);
-                state.bannerTimeout = null;
-            }
-            if (delay > 0) {
-                state.bannerTimeout = setTimeout(() => this.hideStatusBanner(0), delay);
-                return;
-            }
-            const banner = document.getElementById('tk-status-banner');
-            if (banner) {
-                banner.style.opacity = '0';
-                state.bannerTimeout = setTimeout(() => {
-                    banner.style.display = 'none';
-                }, 300);
-            }
-        },
-
         checkPaginationAndDispatch() {
             if (state.isFetchingPage) return;
 
-            const validCount = this.getValidRowsCount();
-            if (validCount < state.targetValidCount) {
-                if (state.fetchPageNum - state.currentPageNum >= (state.settings.maxPagesToFetch || 10)) {
-                    this.showStatusBanner(`已加载至页数限制阈值。当前收集到番号项目: ${validCount} 条`, true);
+            const visibleCount = this.getVisibleCardsCount();
+            if (visibleCount < state.targetValidCount) {
+                if (state.fetchPageNum - state.currentPageNum >= (state.settings.maxPagesToFetch || CONFIG.defaults.maxPagesToFetch)) {
+                    this.showStatusBanner(`已加载至页数限制阈值。当前展示项目: ${visibleCount} 条`, true);
                     this.dispatchQueue();
                     return;
                 }
-                
+
                 state.fetchPageNum++;
                 this.loadNextPage(state.fetchPageNum);
             } else {
-                this.showStatusBanner(`共收集到 ${validCount} 条番号项目，正在异步加载封面数据...`, true);
+                this.showStatusBanner(`共收集到 ${visibleCount} 条项目，正在异步加载封面数据...`, true);
                 this.dispatchQueue();
             }
         },
 
         dispatchQueue() {
-            const validRows = document.querySelectorAll('tr[data-valid-code]:not([data-enhanced="true"])');
-            validRows.forEach(row => {
-                const code = row.dataset.validCode;
-                if (code) {
-                    this.enhanceRow(row, code);
+            const visibleCards = document.querySelectorAll('.tk-media-card:not([data-excluded="true"])');
+            visibleCards.forEach(card => {
+                const code = card.dataset.code;
+                if (!code) return;
+
+                const cached = CacheManager.get(code);
+                if (cached) {
+                    UIUpdater.applyToCard(card, cached.debugInfo || state.debugInfoMap.get(code) || {}, cached);
+                    return;
                 }
+
+                QueueManager.add(code);
             });
 
-            if (state.requestQueue.length === 0) {
+            if (state.requestQueue.length === 0 && !state.isProcessing) {
                 this.showStatusBanner('封面数据已从本地缓存全部加载完成！', true);
             }
         },
@@ -2391,22 +2377,34 @@
             const nextUrl = this.getNextPageUrl(pageNum);
             if (!nextUrl) {
                 console.warn(`[TorrentKitty] 无法解析第 ${pageNum} 页 URL`, window.location.href);
-                this.showStatusBanner(`已无更多页面或无法解析翻页链接。当前累计项目: ${this.getValidRowsCount()} 条`, true);
+                this.showStatusBanner(`已无更多页面或无法解析翻页链接。当前累计项目: ${this.getVisibleCardsCount()} 条`, true);
                 this.dispatchQueue();
                 return;
             }
 
-            this.showStatusBanner(`正在载入第 ${pageNum} 页数据以补充卡片... (当前收集项目: ${this.getValidRowsCount()}/${state.targetValidCount})`);
+            this.showStatusBanner(`正在载入第 ${pageNum} 页数据以补充卡片... (当前展示项目: ${this.getVisibleCardsCount()}/${state.targetValidCount})`);
             state.isFetchingPage = true;
 
             gmFetch(nextUrl).then(response => {
+                if (response.status === 404 || response.status === 410) {
+                    const err = new Error('NO_MORE_PAGES');
+                    err.status = response.status;
+                    throw err;
+                }
+                if (response.status === 403) {
+                    const err = new Error('ACCESS_DENIED');
+                    err.status = response.status;
+                    throw err;
+                }
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
                 return response.text();
             }).then(html => {
+                state.pageRetryCount = 0;
+
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
                 const nextRows = this.getResultRows(doc);
-                
+
                 const resultsTable = this.getResultsTable();
                 if (!resultsTable) {
                     console.error('[TorrentKitty] 已获取翻页响应，但当前页找不到结果表格容器');
@@ -2416,27 +2414,25 @@
                     return;
                 }
 
-                let lastValidRow = null;
+                let addedCount = 0;
                 nextRows.forEach(row => {
-                    const rowText = row.innerText;
+                    const rowText = Utils.getRowText(row);
                     if (rowText.match(CONFIG.codeRegex)) {
-                        const isExcluded = state.excludeKeywords.some(kw => kw && rowText.includes(kw));
-                        if (isExcluded) return;
-
                         const importedRow = document.importNode(row, true);
                         importedRow.dataset.pageNum = pageNum;
-                        importedRow.style.display = 'none'; // 原始 tr 保持隐藏
+                        importedRow.style.display = 'none';
                         resultsTable.appendChild(importedRow);
-                        lastValidRow = importedRow;
+                        if (!ExclusionManager.isTextExcluded(rowText)) {
+                            addedCount++;
+                        }
                     }
                 });
 
                 state.isFetchingPage = false;
-                let addedAny = !!lastValidRow;
-                if (!addedAny) {
+                if (addedCount === 0) {
                     state.consecutiveEmptyPages++;
-                    if (state.consecutiveEmptyPages > 5) {
-                        this.showStatusBanner('由于连续 5 页未探测到有效影视番号资源，停止自动追加。', true);
+                    if (state.consecutiveEmptyPages >= CONFIG.pagination.maxConsecutiveEmptyPages) {
+                        this.showStatusBanner(`由于连续 ${CONFIG.pagination.maxConsecutiveEmptyPages} 页未探测到有效番号资源，停止自动追加。`, true);
                         this.dispatchQueue();
                         return;
                     }
@@ -2447,10 +2443,31 @@
                 }
             }).catch(error => {
                 state.isFetchingPage = false;
-                console.error('[TorrentKitty] 自动翻页错误:', error);
-                this.showStatusBanner(`拉取第 ${pageNum} 页失败，将在 3 秒后重试...`);
+                state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
+
+                if (error.message === 'NO_MORE_PAGES') {
+                    this.showStatusBanner(`已到达最后一页。当前累计项目: ${this.getVisibleCardsCount()} 条`, false);
+                    this.dispatchQueue();
+                    return;
+                }
+
+                if (error.message === 'ACCESS_DENIED') {
+                    this.showStatusBanner(`翻页请求被站点拦截 (HTTP 403)，已停止自动翻页。`, true);
+                    this.dispatchQueue();
+                    return;
+                }
+
+                state.pageRetryCount++;
+                console.error(`[TorrentKitty] 自动翻页错误 (第 ${state.pageRetryCount} 次):`, error);
+
+                if (state.pageRetryCount > CONFIG.pagination.maxPageRetries) {
+                    this.showStatusBanner(`拉取第 ${pageNum} 页连续失败 ${CONFIG.pagination.maxPageRetries} 次，已停止自动重试。`, true);
+                    this.dispatchQueue();
+                    return;
+                }
+
+                this.showStatusBanner(`拉取第 ${pageNum} 页失败 (${state.pageRetryCount}/${CONFIG.pagination.maxPageRetries})，3 秒后重试...`);
                 setTimeout(() => {
-                    state.fetchPageNum--;
                     this.checkPaginationAndDispatch();
                 }, 3000);
             });
@@ -2465,24 +2482,31 @@
             state.currentPageNum = this.getCurrentPageNum();
             state.fetchPageNum = state.currentPageNum;
 
-            // 恢复已缓存的翻页条目，避免刷新页面时产生重复的网络翻页等待
+            // 恢复已缓存的翻页条目（按磁力 BTIH / rowKey 精确去重，不再吞同番号不同版本）
             const cachedEntries = EntryCacheManager.load();
             if (cachedEntries && cachedEntries.data && cachedEntries.data.length > 0) {
                 const resultsTable = this.getResultsTable();
                 if (resultsTable) {
                     const existingRows = this.getResultRows();
-                    const existingCodes = existingRows.map(row => {
-                        const match = row.innerText.match(CONFIG.codeRegex);
-                        return match ? (match[1] || match[2]).toUpperCase() : '';
-                    }).filter(Boolean);
+                    const existingKeys = new Set(existingRows.map((row, idx) => {
+                        const rowText = Utils.getRowText(row);
+                        const match = rowText.match(CONFIG.codeRegex);
+                        if (!match) return '';
+                        let code = (match[1] || match[2]).toUpperCase();
+                        if (!code.includes('-') && /^[A-Z]{2,}/.test(code)) {
+                            code = code.replace(/([A-Z]+)(\d+)/, '$1-$2');
+                        }
+                        const magnet = row.querySelector('a[href^="magnet:"]')?.href || '';
+                        const title = (row.querySelector('.name') || row.cells?.[0])?.textContent?.trim() || '';
+                        return Utils.buildRowKey(code, magnet, title, idx + 1);
+                    }).filter(Boolean));
 
                     let restoreCount = 0;
-                    cachedEntries.data.forEach(item => {
-                        const isDuplicate = existingCodes.some(c => 
-                            c === item.code || c.replace('-', '') === item.code.replace('-', '')
-                        );
-                        if (!isDuplicate) {
-                            const vRow = this.createVirtualRow(item);
+                    cachedEntries.data.forEach((item, idx) => {
+                        const key = item.rowKey || Utils.buildRowKey(item.code, item.magnet, item.title, idx + 1);
+                        if (!existingKeys.has(key)) {
+                            existingKeys.add(key);
+                            const vRow = this.createVirtualRow({ ...item, rowKey: key });
                             resultsTable.appendChild(vRow);
                             restoreCount++;
                         }
@@ -2515,13 +2539,13 @@
 
             let debounceTimer = null;
             state.observer = new MutationObserver((mutations) => {
-                // 只关心元素节点(target 是文本节点时 closest 为 undefined，
-                // 旧实现会把任何文本变化误判为 relevant，触发不必要的 processRows)
+                // 排除脚本自身容器与已隐藏的原站结果表格，避免自我触发风暴
                 const hasRelevantChanges = mutations.some(m =>
                     m.target.nodeType === 1 &&
                     !m.target.closest?.('.tk-main-container') &&
                     !m.target.closest?.('.tk-detail-drawer') &&
-                    !m.target.closest?.('.tk-drawer-overlay')
+                    !m.target.closest?.('.tk-drawer-overlay') &&
+                    !m.target.closest?.('table#archiveResult, table.results, .search-results')
                 );
                 if (hasRelevantChanges) {
                     clearTimeout(debounceTimer);
@@ -2543,6 +2567,7 @@
         },
 
         cleanup() {
+            CacheManager.flushOrder();
             if (state.observer) {
                 state.observer.disconnect();
                 state.observer = null;
