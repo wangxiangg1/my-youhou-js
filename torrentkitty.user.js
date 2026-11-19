@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.9.2
+// @version      4.9.5
 // @description  TorrentKitty 增强：卡片化网格浏览流、版本标签识别、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -66,7 +66,8 @@
             if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
                 return null;
             }
-            return Reflect.apply(openPopup, this, [url, ...args]);
+            const ctx = (this === undefined || this === null) ? pageWindow : this;
+            return Reflect.apply(openPopup, ctx, [url, ...args]);
         };
     }
 
@@ -78,7 +79,7 @@
     }, true);
 
     // ==================== GM_xmlhttpRequest Promise 封装 ====================
-    function gmFetch(url) {
+    function gmFetch(url, extraHeaders = {}) {
         return new Promise((resolve, reject) => {
             GM_xmlhttpRequest({
                 method: 'GET',
@@ -86,7 +87,8 @@
                 timeout: 15000,
                 headers: {
                     'Accept': 'text/html,application/xhtml+xml',
-                    'Accept-Language': 'zh-CN,zh;q=0.9'
+                    'Accept-Language': 'zh-CN,zh;q=0.9',
+                    ...extraHeaders
                 },
                 onload: (response) => resolve({
                     ok: response.status >= 200 && response.status < 300,
@@ -99,6 +101,50 @@
                 ontimeout: () => reject(new Error('请求超时'))
             });
         });
+    }
+
+    // ==================== 同源原生 Fetch 封装（优先复用标签页 Cookie 与安全头） ====================
+    async function sameOriginFetch(url) {
+        let targetUrl;
+        try {
+            targetUrl = new URL(url, window.location.href);
+        } catch {
+            return gmFetch(url);
+        }
+
+        if (targetUrl.origin !== window.location.origin) {
+            return gmFetch(url);
+        }
+
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 15000);
+        try {
+            const response = await fetch(targetUrl.href, {
+                method: 'GET',
+                credentials: 'same-origin',
+                referrer: window.location.href,
+                headers: {
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                },
+                signal: controller.signal
+            });
+            clearTimeout(timer);
+            return {
+                ok: response.ok,
+                status: response.status,
+                statusText: response.statusText,
+                finalUrl: response.url || targetUrl.href,
+                text: () => response.text()
+            };
+        } catch (err) {
+            clearTimeout(timer);
+            if (err && err.name === 'AbortError') {
+                throw new Error('请求超时');
+            }
+            // 同源跳转若发生跨域重定向被 CORS 拦截，再降级到 GM_xmlhttpRequest
+            console.warn('[TorrentKitty] 同源 fetch 异常，尝试降级 GM_xmlhttpRequest:', err);
+            return gmFetch(url, { Referer: window.location.href });
+        }
     }
 
     // ==================== 通用工具函数 ====================
@@ -245,7 +291,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.2';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.5';
 
     const CONFIG = {
         defaults: {
@@ -2175,6 +2221,9 @@
             if (img && skeleton) {
                 if (coverId) {
                     const coverUrl = JavDBService.getCoverUrl(coverId);
+                    img.classList.remove('loaded');
+                    skeleton.style.display = '';
+                    if (fallback) fallback.style.display = 'none';
                     img.onload = () => {
                         if (debugInfo) debugInfo.imageLoadSuccess = true;
                         img.classList.add('loaded');
@@ -2248,17 +2297,17 @@
         formatDebugInfo(debugInfo) {
             const retryLine = debugInfo.retryAttempt ? `\n[+] 重试轮次: 第 ${debugInfo.retryAttempt} 次` : '';
             return `>> SYSTEM DIAGNOSTICS: JAVDB MODULE
-============================================================
-[+] 番号: ${debugInfo.code}
-[+] 时间戳: ${debugInfo.timestamp}
-[+] 请求地址: ${debugInfo.fetchUrl}
-[+] HTTP 状态: ${debugInfo.fetchStatus}${retryLine}
-[+] 命中成功: ${debugInfo.foundResult ? '[ 是 ]' : '[ 否 ]'}
-[+] JavDB 地址: ${debugInfo.javdbUrl || '无'}
-[+] 封面 ID: ${debugInfo.coverId || '无'}
-[+] 封面加载: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '[ 成功 ]' : '[ 失败 ]') : '[ 排队中 ]'}
-[!] 错误捕获: ${debugInfo.errorMessage || '无异常'}
-============================================================`;
+    ============================================================
+    [+] 番号: ${debugInfo.code}
+    [+] 时间戳: ${debugInfo.timestamp}
+    [+] 请求地址: ${debugInfo.fetchUrl}
+    [+] HTTP 状态: ${debugInfo.fetchStatus}${retryLine}
+    [+] 命中成功: ${debugInfo.foundResult ? '[ 是 ]' : '[ 否 ]'}
+    [+] JavDB 地址: ${debugInfo.javdbUrl || '无'}
+    [+] 封面 ID: ${debugInfo.coverId || '无'}
+    [+] 封面加载: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '[ 成功 ]' : '[ 失败 ]') : '[ 排队中 ]'}
+    [!] 错误捕获: ${debugInfo.errorMessage || '无异常'}
+    ============================================================`;
         },
 
         showSettings() {
@@ -2474,15 +2523,25 @@
 
         getResultsTable() {
             const table = this._findResultTable(document);
+            let container = null;
             if (table) {
-                return table.querySelector('tbody') || table;
+                container = table.querySelector('tbody') || table;
+            } else {
+                const firstRow = this.getResultRows()[0];
+                container = firstRow ? firstRow.parentNode : null;
             }
-            const firstRow = this.getResultRows()[0];
-            return firstRow ? firstRow.parentNode : null;
+            if (container && container.dataset) {
+                container.dataset.tkResultTable = 'true';
+            }
+            return container;
         },
 
         getCurrentPageNum() {
             const url = new URL(window.location.href);
+            const queryPage = parseInt(url.searchParams.get('page') || url.searchParams.get('p'), 10);
+            if (!isNaN(queryPage) && queryPage > 0) {
+                return queryPage;
+            }
             const pathParts = url.pathname.split('/').filter(Boolean);
             if (pathParts[0] === 'search' && pathParts[1]) {
                 return parseInt(pathParts[2], 10) || 1;
@@ -2496,29 +2555,74 @@
         },
 
         getNextPageUrl(pageNum) {
-            const url = new URL(window.location.href);
-            const paginationLinks = document.querySelectorAll('.pagination a[href], .pages a[href]');
+            const currentUrl = new URL(window.location.href);
+            const targetStr = String(pageNum);
+            const paginationLinks = document.querySelectorAll('.pagination a[href], .pages a[href], .pager a[href], .page-nav a[href]');
+
             for (const link of paginationLinks) {
                 const href = link.getAttribute('href');
-                if (!href) continue;
-                const linkUrl = new URL(href, url);
-                if (linkUrl.origin !== url.origin) continue;
-                const linkPage = linkUrl.pathname.split('/').filter(Boolean).pop();
-                if (linkPage === String(pageNum)) return linkUrl.href;
+                if (!href || href.startsWith('#') || href.startsWith('javascript:')) continue;
+
+                let linkUrl;
+                try {
+                    linkUrl = new URL(href, currentUrl);
+                } catch {
+                    continue;
+                }
+                if (linkUrl.origin !== currentUrl.origin || linkUrl.href === currentUrl.href) continue;
+
+                const lastPathPart = linkUrl.pathname.split('/').filter(Boolean).pop();
+                const queryPage = linkUrl.searchParams.get('page') || linkUrl.searchParams.get('p');
+                const linkText = (link.textContent || '').trim();
+                if (lastPathPart === targetStr || queryPage === targetStr || linkText === targetStr) {
+                    return linkUrl.href;
+                }
             }
 
-            const pathParts = url.pathname.split('/').filter(Boolean);
+            if (currentUrl.searchParams.has('page') || currentUrl.searchParams.has('p')) {
+                const paramName = currentUrl.searchParams.has('page') ? 'page' : 'p';
+                const nextUrl = new URL(currentUrl.href);
+                nextUrl.searchParams.set(paramName, targetStr);
+                nextUrl.hash = '';
+                return nextUrl.href;
+            }
+
+            const hadTrailingSlash = currentUrl.pathname.endsWith('/');
+            const pathParts = currentUrl.pathname.split('/').filter(Boolean);
             if (pathParts[0] === 'search' && pathParts[1]) {
                 if (/^\d+$/.test(pathParts[2] || '')) {
-                    pathParts[2] = String(pageNum);
+                    pathParts[2] = targetStr;
                 } else {
-                    pathParts.splice(2, 0, String(pageNum));
+                    pathParts.splice(2, 0, targetStr);
                 }
-                url.pathname = '/' + pathParts.join('/');
-                url.hash = '';
-                return url.href;
+                const nextUrl = new URL(currentUrl.href);
+                nextUrl.pathname = '/' + pathParts.join('/') + (hadTrailingSlash ? '/' : '');
+                nextUrl.hash = '';
+                return nextUrl.href;
             }
             return null;
+        },
+
+        /**
+         * 提取当前结果表格中已有条目的去重键集合（优先使用磁力 BTIH 派生键）
+         */
+        getExistingRowKeys() {
+            const keys = new Set();
+            this.getResultRows().forEach((row, idx) => {
+                if (row.dataset.rowKey) {
+                    keys.add(row.dataset.rowKey);
+                }
+                const rowText = Utils.getRowText(row);
+                const code = row.dataset.validCode || Utils.extractCode(rowText);
+                if (!code) return;
+                const magnet = row.querySelector('a[href^="magnet:"]')?.href || '';
+                const title = (row.querySelector('.name') || row.cells?.[0])?.textContent?.trim() || '';
+                keys.add(Utils.buildRowKey(code, magnet, title, idx + 1));
+                if (!magnet) {
+                    keys.add(`no-magnet:${code}|${title}`);
+                }
+            });
+            return keys;
         },
 
         processRows() {
@@ -2622,7 +2726,7 @@
             }
         },
 
-        showStatusBanner(text, showContinueBtn = false) {
+        showStatusBanner(text, showContinueBtn = false, actionLink = null) {
             let banner = document.getElementById('tk-status-banner');
             if (!banner) {
                 banner = document.createElement('div');
@@ -2659,6 +2763,7 @@
                 const btn = document.createElement('button');
                 btn.textContent = '加载更多';
                 btn.className = 'tk-toolbar-btn';
+                btn.style.marginLeft = '8px';
                 btn.onclick = () => {
                     state.pageRetryCount = 0;
                     state.consecutiveEmptyPages = 0;
@@ -2669,8 +2774,25 @@
                 banner.appendChild(btn);
             }
 
+            if (actionLink && actionLink.href) {
+                const linkBtn = document.createElement('a');
+                linkBtn.textContent = actionLink.label || '打开下一页 ↗';
+                linkBtn.href = actionLink.href;
+                linkBtn.className = 'tk-toolbar-btn';
+                linkBtn.style.marginLeft = '8px';
+                linkBtn.style.textDecoration = 'none';
+                linkBtn.style.display = 'inline-block';
+                banner.appendChild(linkBtn);
+            }
+
             banner.style.display = 'block';
             banner.style.opacity = '1';
+        },
+
+        stopPagination(message, showContinueBtn = true, actionLink = null) {
+            state.targetValidCount = this.getVisibleCardsCount();
+            this.showStatusBanner(message, showContinueBtn, actionLink);
+            this.dispatchQueue({ preserveBanner: true });
         },
 
         checkPaginationAndDispatch() {
@@ -2679,8 +2801,7 @@
             const visibleCount = this.getVisibleCardsCount();
             if (visibleCount < state.targetValidCount) {
                 if (state.fetchPageNum - state.currentPageNum >= (state.settings.maxPagesToFetch || CONFIG.defaults.maxPagesToFetch)) {
-                    this.showStatusBanner(`已加载至页数限制阈值。当前展示项目: ${visibleCount} 条`, true);
-                    this.dispatchQueue();
+                    this.stopPagination(`已加载至页数限制阈值。当前展示项目: ${visibleCount} 条`, true);
                     return;
                 }
 
@@ -2692,7 +2813,8 @@
             }
         },
 
-        dispatchQueue() {
+        dispatchQueue(options = {}) {
+            const { preserveBanner = false } = options;
             const visibleCards = document.querySelectorAll('.tk-media-card:not([data-excluded="true"])');
             visibleCards.forEach(card => {
                 const code = card.dataset.code;
@@ -2707,7 +2829,7 @@
                 QueueManager.add(code);
             });
 
-            if (state.requestQueue.length === 0 && !state.isProcessing) {
+            if (!preserveBanner && state.requestQueue.length === 0 && !state.isProcessing) {
                 this.showStatusBanner('封面数据已从本地缓存全部加载完成！', true);
             }
         },
@@ -2715,16 +2837,18 @@
         loadNextPage(pageNum) {
             const nextUrl = this.getNextPageUrl(pageNum);
             if (!nextUrl) {
+                state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
                 console.warn(`[TorrentKitty] 无法解析第 ${pageNum} 页 URL`, window.location.href);
-                this.showStatusBanner(`已无更多页面或无法解析翻页链接。当前累计项目: ${this.getVisibleCardsCount()} 条`, true);
-                this.dispatchQueue();
+                this.stopPagination(`已无更多页面或无法解析翻页链接。当前累计项目: ${this.getVisibleCardsCount()} 条`, true);
                 return;
             }
 
+            console.log(`[TorrentKitty] 开始拉取第 ${pageNum} 页:`, nextUrl);
             this.showStatusBanner(`正在载入第 ${pageNum} 页数据以补充卡片... (当前展示项目: ${this.getVisibleCardsCount()}/${state.targetValidCount})`);
             state.isFetchingPage = true;
 
-            gmFetch(nextUrl).then(response => {
+            sameOriginFetch(nextUrl).then(response => {
+                console.log(`[TorrentKitty] 第 ${pageNum} 页响应: HTTP ${response.status} -> ${response.finalUrl}`);
                 if (response.status === 404 || response.status === 410) {
                     const err = new Error('NO_MORE_PAGES');
                     err.status = response.status;
@@ -2742,6 +2866,7 @@
 
                 const parser = new DOMParser();
                 const doc = parser.parseFromString(html, 'text/html');
+                const hasResultTable = Boolean(this._findResultTable(doc));
                 const nextRows = this.getResultRows(doc);
 
                 const resultsTable = this.getResultsTable();
@@ -2749,30 +2874,79 @@
                     console.error('[TorrentKitty] 已获取翻页响应，但当前页找不到结果表格容器');
                     state.isFetchingPage = false;
                     state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
-                    this.showStatusBanner('已获取下一页，但无法识别结果表格。请检查页面结构或脚本版本。', true);
+                    this.stopPagination('已获取下一页，但无法识别结果表格。请检查页面结构或脚本版本。', true);
                     return;
                 }
 
-                let addedCount = 0;
-                nextRows.forEach(row => {
+                if (nextRows.length === 0) {
+                    console.warn(`[TorrentKitty] 第 ${pageNum} 页无结果行`, {
+                        nextUrl,
+                        hasResultTable,
+                        title: doc.title,
+                        htmlLength: html.length
+                    });
+                    state.isFetchingPage = false;
+                    state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
+                    const msg = hasResultTable
+                        ? `第 ${pageNum} 页已无更多搜索结果。当前累计项目: ${this.getVisibleCardsCount()} 条`
+                        : `第 ${pageNum} 页未检测到结果列表（页面标题: ${doc.title || '未知'}），可能无更多页或触发站点拦截`;
+                    this.stopPagination(msg, !hasResultTable);
+                    return;
+                }
+
+                const existingKeys = this.getExistingRowKeys();
+                let parsedCount = 0;
+                let duplicateCount = 0;
+                let newTotalCount = 0;
+                let addedVisibleCount = 0;
+
+                nextRows.forEach((row, idx) => {
                     const rowText = Utils.getRowText(row);
-                    if (Utils.extractCode(rowText)) {
-                        const importedRow = document.importNode(row, true);
-                        importedRow.dataset.pageNum = pageNum;
-                        importedRow.style.display = 'none';
-                        resultsTable.appendChild(importedRow);
-                        if (!ExclusionManager.isTextExcluded(rowText)) {
-                            addedCount++;
-                        }
+                    const code = Utils.extractCode(rowText);
+                    if (!code) return;
+
+                    parsedCount++;
+                    const magnet = row.querySelector('a[href^="magnet:"]')?.href || '';
+                    const title = (row.querySelector('.name') || row.cells?.[0])?.textContent?.trim() || '';
+                    const rowKey = Utils.buildRowKey(code, magnet, title, idx + 1);
+                    const dedupeKey = magnet ? rowKey : `no-magnet:${code}|${title}`;
+
+                    if (existingKeys.has(rowKey) || existingKeys.has(dedupeKey)) {
+                        duplicateCount++;
+                        return;
+                    }
+
+                    existingKeys.add(rowKey);
+                    existingKeys.add(dedupeKey);
+
+                    const importedRow = document.importNode(row, true);
+                    importedRow.dataset.pageNum = pageNum;
+                    if (magnet) importedRow.dataset.rowKey = rowKey;
+                    importedRow.style.display = 'none';
+                    resultsTable.appendChild(importedRow);
+                    newTotalCount++;
+
+                    if (!ExclusionManager.isTextExcluded(rowText)) {
+                        addedVisibleCount++;
                     }
                 });
 
+                console.log(`[TorrentKitty] 第 ${pageNum} 页解析汇总: 原始行=${nextRows.length}, 有效番号=${parsedCount}, 重复=${duplicateCount}, 新增=${newTotalCount}, 未排除=${addedVisibleCount}`);
                 state.isFetchingPage = false;
-                if (addedCount === 0) {
+
+                if (parsedCount > 0 && newTotalCount === 0) {
+                    state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
+                    this.stopPagination(`第 ${pageNum} 页返回内容与当前结果重复，暂无更多新数据（当前共 ${this.getVisibleCardsCount()} 条）`, true);
+                    return;
+                }
+
+                if (addedVisibleCount === 0) {
                     state.consecutiveEmptyPages++;
                     if (state.consecutiveEmptyPages >= CONFIG.pagination.maxConsecutiveEmptyPages) {
-                        this.showStatusBanner(`由于连续 ${CONFIG.pagination.maxConsecutiveEmptyPages} 页未探测到有效番号资源，停止自动追加。`, true);
-                        this.dispatchQueue();
+                        if (newTotalCount === 0) {
+                            state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
+                        }
+                        this.stopPagination(`由于连续 ${CONFIG.pagination.maxConsecutiveEmptyPages} 页未探测到有效番号资源，停止自动追加。`, true);
                         return;
                     }
                     setTimeout(() => this.checkPaginationAndDispatch(), 1000);
@@ -2785,14 +2959,16 @@
                 state.fetchPageNum = Math.max(state.currentPageNum, pageNum - 1);
 
                 if (error.message === 'NO_MORE_PAGES') {
-                    this.showStatusBanner(`已到达最后一页。当前累计项目: ${this.getVisibleCardsCount()} 条`, false);
-                    this.dispatchQueue();
+                    this.stopPagination(`已到达最后一页。当前累计项目: ${this.getVisibleCardsCount()} 条`, false);
                     return;
                 }
 
                 if (error.message === 'ACCESS_DENIED') {
-                    this.showStatusBanner(`翻页请求被站点拦截 (HTTP 403)，已停止自动翻页。`, true);
-                    this.dispatchQueue();
+                    this.stopPagination(
+                        '翻页请求被站点拦截 (HTTP 403)，可尝试直接打开下一页。',
+                        true,
+                        { label: `打开第 ${pageNum} 页 ↗`, href: nextUrl }
+                    );
                     return;
                 }
 
@@ -2800,8 +2976,7 @@
                 console.error(`[TorrentKitty] 自动翻页错误 (第 ${state.pageRetryCount} 次):`, error);
 
                 if (state.pageRetryCount > CONFIG.pagination.maxPageRetries) {
-                    this.showStatusBanner(`拉取第 ${pageNum} 页连续失败 ${CONFIG.pagination.maxPageRetries} 次，已停止自动重试。`, true);
-                    this.dispatchQueue();
+                    this.stopPagination(`拉取第 ${pageNum} 页连续失败 ${CONFIG.pagination.maxPageRetries} 次，已停止自动重试。`, true);
                     return;
                 }
 
@@ -2826,15 +3001,7 @@
             if (cachedEntries && cachedEntries.data && cachedEntries.data.length > 0) {
                 const resultsTable = this.getResultsTable();
                 if (resultsTable) {
-                    const existingRows = this.getResultRows();
-                    const existingKeys = new Set(existingRows.map((row, idx) => {
-                        const rowText = Utils.getRowText(row);
-                        const code = Utils.extractCode(rowText);
-                        if (!code) return '';
-                        const magnet = row.querySelector('a[href^="magnet:"]')?.href || '';
-                        const title = (row.querySelector('.name') || row.cells?.[0])?.textContent?.trim() || '';
-                        return Utils.buildRowKey(code, magnet, title, idx + 1);
-                    }).filter(Boolean));
+                    const existingKeys = this.getExistingRowKeys();
 
                     let restoreCount = 0;
                     cachedEntries.data.forEach((item, idx) => {
@@ -2843,8 +3010,10 @@
                             ? { ...item, code: fixedCode, rowKey: Utils.buildRowKey(fixedCode, item.magnet, item.title, idx + 1) }
                             : item;
                         const key = fixedItem.rowKey || Utils.buildRowKey(fixedItem.code, fixedItem.magnet, fixedItem.title, idx + 1);
-                        if (!existingKeys.has(key)) {
+                        const dedupeKey = fixedItem.magnet ? key : `no-magnet:${fixedItem.code}|${fixedItem.title}`;
+                        if (!existingKeys.has(key) && !existingKeys.has(dedupeKey)) {
                             existingKeys.add(key);
+                            existingKeys.add(dedupeKey);
                             const vRow = this.createVirtualRow({ ...fixedItem, rowKey: key });
                             resultsTable.appendChild(vRow);
                             restoreCount++;
@@ -2884,7 +3053,7 @@
                     !m.target.closest?.('.tk-main-container') &&
                     !m.target.closest?.('.tk-detail-drawer') &&
                     !m.target.closest?.('.tk-drawer-overlay') &&
-                    !m.target.closest?.('table#archiveResult, table.results, .search-results')
+                    !m.target.closest?.('table#archiveResult, table.results, .search-results, [data-tk-result-table="true"]')
                 );
                 if (hasRelevantChanges) {
                     clearTimeout(debounceTimer);
