@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.0.4
-// @description  TorrentKitty 增强：卡片化网格浏览流、三源高清封面分摊与熔断、两级图文收藏夹与本地 WebP 分片缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
+// @version      5.1.0
+// @description  TorrentKitty + JavDB + MissAV + Jable 全站增强：卡片流瀑布、三源高清封面、跨站直达互跳、全站私有两级收藏夹与 WebP 缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -24,6 +24,11 @@
 // @match        *://torrentkitty.one/*
 // @match        *://www.torrentkitty.dev/*
 // @match        *://torrentkitty.dev/*
+// @match        https://javdb.com/*
+// @match        https://missav.ws/*
+// @match        https://missav.com/*
+// @match        https://missav.ai/*
+// @match        https://jable.tv/*
 // @updateURL    https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
 // @downloadURL  https://raw.githubusercontent.com/wangxiangg1/my-youhou-js/main/torrentkitty.user.js
 // @run-at       document-start
@@ -55,32 +60,49 @@
 (function () {
     'use strict';
 
-    // ==================== 0. 早期广告弹窗拦截与磁力防劫持 ====================
-    const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
-    const adPopupDomains = ['rebrand.ly', 'wingsmob.com', 'acscdn.com', 'rapidadexchange.com'];
-    const openPopup = pageWindow.open;
-    if (typeof openPopup === 'function') {
-        pageWindow.open = function (url, ...args) {
-            let host;
-            try {
-                host = new URL(url, location.href).hostname;
-            } catch {
-                // 交由浏览器按原样处理非法 URL
-            }
-            if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
-                return null;
-            }
-            const ctx = (this === undefined || this === null) ? pageWindow : this;
-            return Reflect.apply(openPopup, ctx, [url, ...args]);
-        };
-    }
-
-    // 跳过站点延迟推广点击劫持，保留原生磁力链接行为
-    window.addEventListener('click', event => {
-        if (event.target?.closest?.('a[href^="magnet:"]')) {
-            event.stopImmediatePropagation();
+    // ==================== 站点识别 ====================
+    const SiteDetector = {
+        detect(hostname = (typeof location !== 'undefined' ? location.hostname : '')) {
+            const host = String(hostname || '').toLowerCase();
+            if (host.includes('torrentkitty') || host.includes('torkitty.net')) return 'torrentkitty';
+            if (host === 'javdb.com' || host.endsWith('.javdb.com')) return 'javdb';
+            if (host.includes('missav')) return 'missav';
+            if (host === 'jable.tv' || host.endsWith('.jable.tv')) return 'jable';
+            return 'unknown';
+        },
+        isTorrentKitty() {
+            return this.detect() === 'torrentkitty';
         }
-    }, true);
+    };
+
+    // ==================== 0. 早期广告弹窗拦截与磁力防劫持（仅 TorrentKitty） ====================
+    const pageWindow = typeof unsafeWindow === 'undefined' ? window : unsafeWindow;
+    if (SiteDetector.isTorrentKitty()) {
+        const adPopupDomains = ['rebrand.ly', 'wingsmob.com', 'acscdn.com', 'rapidadexchange.com'];
+        const openPopup = pageWindow.open;
+        if (typeof openPopup === 'function') {
+            pageWindow.open = function (url, ...args) {
+                let host;
+                try {
+                    host = new URL(url, location.href).hostname;
+                } catch {
+                    // 交由浏览器按原样处理非法 URL
+                }
+                if (host && adPopupDomains.some(domain => host === domain || host.endsWith('.' + domain))) {
+                    return null;
+                }
+                const ctx = (this === undefined || this === null) ? pageWindow : this;
+                return Reflect.apply(openPopup, ctx, [url, ...args]);
+            };
+        }
+
+        // 跳过站点延迟推广点击劫持，保留原生磁力链接行为
+        window.addEventListener('click', event => {
+            if (event.target?.closest?.('a[href^="magnet:"]')) {
+                event.stopImmediatePropagation();
+            }
+        }, true);
+    }
 
     // ==================== GM_xmlhttpRequest Promise 封装 ====================
     function gmRequest(url, options = {}) {
@@ -330,7 +352,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.4';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.1.0';
 
     const CONFIG = {
         defaults: {
@@ -406,11 +428,13 @@
 
         injectGlobalStyles() {
             if (document.getElementById('tk-enhanced-styles')) return;
+            const container = document.head || document.documentElement;
+            if (!container) return;
 
             const fontLink = document.createElement('link');
             fontLink.rel = 'stylesheet';
             fontLink.href = 'https://fonts.loli.net/css2?family=Epilogue:wght@300;400;500;600;700&family=IBM+Plex+Mono:wght@400;500;700&family=Fraunces:ital,opsz,wght@0,9..144,300..900;1,9..144,300..900&display=swap';
-            document.head.appendChild(fontLink);
+            container.appendChild(fontLink);
 
             const style = document.createElement('style');
             style.id = 'tk-enhanced-styles';
@@ -463,61 +487,75 @@
                     100% { background-position: -200% 0; }
                 }
 
-                /* 强行覆盖原网页背景与质感，清除原有容器的残留绿色背景 */
-                body, html, #main, .wrapper, header, footer, #header, #footer, .becbdbcf, .reco-container, #overlay, #note {
+                /* 强行覆盖 TorrentKitty 原网页背景与质感，限定在 html.tk-site-torrentkitty 避免污染 JavDB/MissAV/Jable */
+                html.tk-site-torrentkitty,
+                html.tk-site-torrentkitty body,
+                html.tk-site-torrentkitty #main,
+                html.tk-site-torrentkitty .wrapper,
+                html.tk-site-torrentkitty header,
+                html.tk-site-torrentkitty footer,
+                html.tk-site-torrentkitty #header,
+                html.tk-site-torrentkitty #footer,
+                html.tk-site-torrentkitty .becbdbcf,
+                html.tk-site-torrentkitty .reco-container,
+                html.tk-site-torrentkitty #overlay,
+                html.tk-site-torrentkitty #note {
                     background-color: var(--tk-bg) !important;
                     background-image: none !important;
                     background: var(--tk-bg) !important;
                 }
 
-                header .login,
-                header .login a {
+                html.tk-site-torrentkitty header .login,
+                html.tk-site-torrentkitty header .login a {
                     color: var(--tk-text-muted) !important;
                 }
 
-                header .login a {
+                html.tk-site-torrentkitty header .login a {
                     font-weight: 600;
                     text-decoration: underline;
                     text-underline-offset: 3px;
                 }
 
-                #main nav > a.menu {
+                html.tk-site-torrentkitty #main nav > a.menu {
                     background: #e4f1ee !important;
                     color: var(--tk-moss) !important;
                     border: 1px solid #b6cbc5;
                 }
 
-                #main nav > a.menu:hover {
+                html.tk-site-torrentkitty #main nav > a.menu:hover {
                     background: var(--tk-primary) !important;
                     color: #fff !important;
                 }
 
-                header .login a:focus-visible,
-                #main nav > a.menu:focus-visible {
+                html.tk-site-torrentkitty header .login a:focus-visible,
+                html.tk-site-torrentkitty #main nav > a.menu:focus-visible {
                     outline: 2px solid var(--tk-primary);
                     outline-offset: 2px;
                 }
 
-                .wrapper {
+                html.tk-site-torrentkitty .wrapper {
                     width: 95% !important;
                     max-width: var(--tk-page-max-width, 1200px) !important;
                     margin: 0 auto !important;
                 }
 
-                .reco-container,
-                .vpn-warning,
-                #sticky-banner.sticky-banner,
-                body > div.becbdbcf,
-                body > div:has(> a[href*="zoog.pro/"]),
-                body > a[href*="rapidadexchange.com/"],
-                #main .wrapper > div:has(> #rotator1_div),
-                .tk-page-clutter {
+                html.tk-site-torrentkitty .reco-container,
+                html.tk-site-torrentkitty .vpn-warning,
+                html.tk-site-torrentkitty #sticky-banner.sticky-banner,
+                html.tk-site-torrentkitty body > div.becbdbcf,
+                html.tk-site-torrentkitty body > div:has(> a[href*="zoog.pro/"]),
+                html.tk-site-torrentkitty body > a[href*="rapidadexchange.com/"],
+                html.tk-site-torrentkitty #main .wrapper > div:has(> #rotator1_div),
+                html.tk-site-torrentkitty .tk-page-clutter {
                     display: none !important;
                 }
 
-                /* 隐藏原网页表格与分页器 */
-                table#archiveResult, table.results, .search-results table,
-                .pagination, .pages {
+                /* 隐藏 TorrentKitty 原网页表格与分页器 */
+                html.tk-site-torrentkitty table#archiveResult,
+                html.tk-site-torrentkitty table.results,
+                html.tk-site-torrentkitty .search-results table,
+                html.tk-site-torrentkitty .pagination,
+                html.tk-site-torrentkitty .pages {
                     display: none !important;
                 }
 
@@ -1865,6 +1903,134 @@
                     background: rgba(61, 50, 38, 0.16);
                 }
 
+                .tk-fav-floating-bar.is-bridge-site {
+                    top: 64px;
+                    right: 16px;
+                }
+
+                /* 跨站 Bridge 直达互跳与收藏操作条 (JavDB / MissAV / Jable) */
+                .tk-bridge-bar {
+                    display: inline-flex;
+                    align-items: center;
+                    flex-wrap: wrap;
+                    gap: 7px;
+                    margin-left: 10px;
+                    vertical-align: middle;
+                    font-family: var(--tk-font-body);
+                }
+
+                .tk-bridge-bar--block {
+                    display: flex;
+                    margin: 10px 0 0 0;
+                }
+
+                .tk-bridge-bar--floating {
+                    position: fixed;
+                    top: 112px;
+                    right: 16px;
+                    z-index: 9985;
+                    display: flex;
+                    flex-direction: column;
+                    align-items: stretch;
+                    margin: 0;
+                    padding: 8px;
+                    border-radius: 14px;
+                    background: rgba(252, 248, 239, 0.9);
+                    backdrop-filter: blur(8px);
+                    -webkit-backdrop-filter: blur(8px);
+                    border: 1px solid var(--tk-card-border);
+                    box-shadow: 0 8px 24px rgba(25, 38, 48, 0.18);
+                }
+
+                .tk-bridge-btn {
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 5px;
+                    padding: 5px 12px;
+                    border-radius: 9999px;
+                    font-size: 12px;
+                    font-weight: 700;
+                    line-height: 1.3;
+                    text-decoration: none !important;
+                    cursor: pointer;
+                    border: 1px solid transparent;
+                    color: #ffffff !important;
+                    white-space: nowrap;
+                    font-family: var(--tk-font-body);
+                    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+                    transition: transform 0.18s ease, filter 0.18s ease, box-shadow 0.18s ease;
+                }
+
+                .tk-bridge-btn:hover {
+                    transform: translateY(-1px);
+                    filter: brightness(1.08);
+                    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.18);
+                }
+
+                .tk-bridge-btn--missav {
+                    background: #963f32 !important;
+                }
+
+                .tk-bridge-btn--jable {
+                    background: #495968 !important;
+                }
+
+                .tk-bridge-btn--javdb {
+                    background: #186459 !important;
+                }
+
+                .tk-bridge-btn--tk {
+                    background: #205e54 !important;
+                }
+
+                .tk-bridge-btn--search {
+                    background: #805816 !important;
+                }
+
+                .tk-bridge-btn--loading {
+                    background: #ded3bf !important;
+                    color: #4d5b67 !important;
+                    pointer-events: none;
+                }
+
+                .tk-bridge-btn--error {
+                    background: #963f32 !important;
+                }
+
+                .tk-bridge-fav-btn {
+                    background: #fbf4e4 !important;
+                    color: #805816 !important;
+                    border: 1px solid rgba(128, 88, 22, 0.35) !important;
+                }
+
+                .tk-bridge-fav-btn.is-favorited {
+                    background: #805816 !important;
+                    color: #fcf8ef !important;
+                    border-color: #6b4810 !important;
+                }
+
+                .tk-bridge-row-fav {
+                    display: inline-flex;
+                    align-items: center;
+                    padding: 2px 8px;
+                    margin-left: 6px;
+                    border-radius: 6px;
+                    font-size: 11px;
+                    font-weight: 700;
+                    cursor: pointer;
+                    border: 1px solid rgba(128, 88, 22, 0.32);
+                    background: #fbf4e4;
+                    color: #805816;
+                    font-family: var(--tk-font-body);
+                }
+
+                .tk-bridge-row-fav.is-favorited {
+                    background: #805816;
+                    color: #fcf8ef;
+                    border-color: #6b4810;
+                }
+
                 /* 手机窄屏响应式适配 */
                 @media (max-width: 640px) {
                     .tk-fav-floating-bar {
@@ -1899,7 +2065,7 @@
                     }
                 }
             `;
-            document.head.appendChild(style);
+            container.appendChild(style);
         }
     };
 
@@ -1950,6 +2116,7 @@
             error: ''
         },
         cardDataMap: new Map(),
+        bridgeFavDataMap: new Map(),
         activeDrawerData: null
     };
 
@@ -2505,7 +2672,9 @@
             const btihMatch = data.magnet && String(data.magnet).match(/btih:([a-zA-Z0-9]+)/i);
             if (btihMatch) return `btih:${btihMatch[1].toLowerCase()}`;
             if (data.magnet) return `mag:${String(data.magnet).trim()}`;
-            return `meta:${String(data.code || '').toUpperCase()}::${String(data.title || '').trim()}`;
+            const code = String(data.code || '').trim().toUpperCase();
+            if (code && code !== 'UNKNOWN') return `meta:${code}`;
+            return `meta::${String(data.title || '').trim()}`;
         },
 
         getFolders() {
@@ -2760,6 +2929,13 @@
                 const data = rowKey && state.cardDataMap.get(rowKey);
                 const btn = card.querySelector('.tk-btn-fav');
                 if (btn && data) {
+                    this.applyButtonState(btn, data);
+                }
+            });
+            document.querySelectorAll('.tk-bridge-fav-btn, .tk-bridge-row-fav').forEach(btn => {
+                const key = btn.dataset.tkBridgeKey;
+                const data = key && state.bridgeFavDataMap.get(key);
+                if (data) {
                     this.applyButtonState(btn, data);
                 }
             });
@@ -5808,17 +5984,23 @@
             document.querySelectorAll('.tk-fav-popover').forEach(el => el.remove());
         },
 
-        handleFavButtonClick(favBtn, data, img) {
-            const currentOpen = document.querySelector(`.tk-fav-popover[data-for-row="${CSS.escape(data.rowKey)}"]`);
+        handleFavButtonClick(favBtn, data, imgOrUrl) {
+            const popoverKey = data.rowKey || FavoritesManager.buildKey(data) || data.code || 'fav';
+            const currentOpen = document.querySelector(`.tk-fav-popover[data-for-row="${CSS.escape(popoverKey)}"]`);
             this.closeAllFavPopovers();
             if (currentOpen) return;
 
-            const currentUrl = (img && img.src && /^https?:\/\//i.test(img.src)) ? img.src : '';
+            let currentUrl = '';
+            if (typeof imgOrUrl === 'string') {
+                currentUrl = /^https?:\/\//i.test(imgOrUrl) ? imgOrUrl : '';
+            } else if (imgOrUrl && imgOrUrl.src && /^https?:\/\//i.test(imgOrUrl.src)) {
+                currentUrl = imgOrUrl.src;
+            }
             const existing = FavoritesManager.findByData(data);
 
             const popover = document.createElement('div');
             popover.className = 'tk-fav-popover';
-            popover.dataset.forRow = data.rowKey;
+            popover.dataset.forRow = popoverKey;
             popover.addEventListener('click', (e) => e.stopPropagation());
 
             const title = document.createElement('div');
@@ -6589,33 +6771,40 @@
 
                 const magnetText = document.createElement('div');
                 magnetText.className = 'tk-fav-magnet-mono';
-                magnetText.textContent = item.magnet || '无磁力链接';
+                magnetText.textContent = item.magnet || '暂无磁力链接（来自 MissAV/Jable/无磁力条目，可前往 TorrentKitty 搜索）';
 
                 const magnetBtns = document.createElement('div');
                 magnetBtns.className = 'tk-fav-magnet-actions';
 
-                const copyMagBtn = document.createElement('button');
-                copyMagBtn.type = 'button';
-                copyMagBtn.className = 'tk-fav-mini-btn is-primary';
-                copyMagBtn.textContent = '🧲 复制磁力';
-                copyMagBtn.onclick = () => {
-                    if (!item.magnet) return;
-                    Utils.copyText(item.magnet).then(() => {
-                        copyMagBtn.textContent = '✅ 已复制';
-                        setTimeout(() => { copyMagBtn.textContent = '🧲 复制磁力'; }, 1200);
-                    });
-                };
+                if (item.magnet) {
+                    const copyMagBtn = document.createElement('button');
+                    copyMagBtn.type = 'button';
+                    copyMagBtn.className = 'tk-fav-mini-btn is-primary';
+                    copyMagBtn.textContent = '🧲 复制磁力';
+                    copyMagBtn.onclick = () => {
+                        Utils.copyText(item.magnet).then(() => {
+                            copyMagBtn.textContent = '✅ 已复制';
+                            setTimeout(() => { copyMagBtn.textContent = '🧲 复制磁力'; }, 1200);
+                        });
+                    };
 
-                const launchMagLink = document.createElement('a');
-                launchMagLink.className = 'tk-fav-mini-btn';
-                launchMagLink.href = item.magnet || '#';
-                launchMagLink.textContent = '⚡ 唤起下载';
-                if (!item.magnet) {
-                    launchMagLink.style.pointerEvents = 'none';
-                    launchMagLink.style.opacity = '0.5';
+                    const launchMagLink = document.createElement('a');
+                    launchMagLink.className = 'tk-fav-mini-btn';
+                    launchMagLink.href = item.magnet;
+                    launchMagLink.textContent = '⚡ 唤起下载';
+                    magnetBtns.append(copyMagBtn, launchMagLink);
+                } else {
+                    const searchTkLink = document.createElement('a');
+                    searchTkLink.className = 'tk-fav-mini-btn is-primary';
+                    searchTkLink.href = typeof BridgeConfig !== 'undefined'
+                        ? BridgeConfig.getTorrentKittySearchUrl(item.code)
+                        : `https://www.torrentkitty.tv/search/${encodeURIComponent(item.code || '')}/`;
+                    searchTkLink.target = '_blank';
+                    searchTkLink.rel = 'noopener noreferrer';
+                    searchTkLink.textContent = '🧲 去 TorrentKitty 搜磁力';
+                    magnetBtns.appendChild(searchTkLink);
                 }
 
-                magnetBtns.append(copyMagBtn, launchMagLink);
                 magnetSection.append(magnetText, magnetBtns);
 
                 // 管理与外链
@@ -7573,6 +7762,537 @@
         }
     };
 
+    // ==================== 跨站直达与私有收藏模块 (JavDB / MissAV / Jable) ====================
+    const BridgeConfig = {
+        cacheExpiry: 7 * 24 * 60 * 60 * 1000,
+        negativeCacheExpiry: 24 * 60 * 60 * 1000,
+        NOT_FOUND_MARKER: '__NOT_FOUND__',
+        cachePrefix: 'javdb_hash_',
+        javdbBaseUrl: 'https://javdb.com',
+        jableBaseUrl: 'https://jable.tv',
+
+        getMissavBaseUrl() {
+            const stored = typeof GM_getValue === 'function' ? GM_getValue('missav_origin', '') : '';
+            return stored ? `${stored}/cn` : 'https://missav.ws/cn';
+        },
+
+        getTorrentKittySearchUrl(code) {
+            const stored = typeof GM_getValue === 'function' ? GM_getValue('tk_preferred_origin', '') : '';
+            const origin = stored || 'https://www.torrentkitty.tv';
+            return `${origin.replace(/\/+$/, '')}/search/${encodeURIComponent(code || '')}/`;
+        }
+    };
+
+    const BridgeCache = {
+        get(code) {
+            if (typeof GM_getValue !== 'function') return null;
+            const cacheKey = BridgeConfig.cachePrefix + code;
+            try {
+                const cached = GM_getValue(cacheKey);
+                if (!cached) return null;
+                const { url, timestamp, isNegative } = JSON.parse(cached);
+                const expiry = isNegative ? BridgeConfig.negativeCacheExpiry : BridgeConfig.cacheExpiry;
+                if (Date.now() - timestamp < expiry) {
+                    return { url, isNegative: Boolean(isNegative) };
+                }
+                if (typeof GM_deleteValue === 'function') GM_deleteValue(cacheKey);
+            } catch (e) {
+                console.error('[Bridge] 缓存读取错误:', e);
+            }
+            return null;
+        },
+
+        set(code, url) {
+            if (typeof GM_setValue !== 'function') return;
+            try {
+                GM_setValue(BridgeConfig.cachePrefix + code, JSON.stringify({
+                    url,
+                    timestamp: Date.now(),
+                    isNegative: false
+                }));
+            } catch (e) {
+                console.error('[Bridge] 缓存写入错误:', e);
+            }
+        },
+
+        setNotFound(code) {
+            if (typeof GM_setValue !== 'function') return;
+            try {
+                GM_setValue(BridgeConfig.cachePrefix + code, JSON.stringify({
+                    url: BridgeConfig.NOT_FOUND_MARKER,
+                    timestamp: Date.now(),
+                    isNegative: true
+                }));
+            } catch (e) {
+                console.error('[Bridge] 负缓存写入错误:', e);
+            }
+        },
+
+        cleanup() {
+            if (typeof GM_listValues !== 'function' || typeof GM_getValue !== 'function') return;
+            try {
+                const lastCleanup = GM_getValue('last_cleanup_date', 0);
+                if (Date.now() - lastCleanup < 24 * 60 * 60 * 1000) return;
+                GM_setValue('last_cleanup_date', Date.now());
+                for (const key of GM_listValues()) {
+                    if (!key.startsWith(BridgeConfig.cachePrefix)) continue;
+                    const raw = GM_getValue(key);
+                    if (!raw) continue;
+                    try {
+                        const { timestamp, isNegative } = JSON.parse(raw);
+                        const expiry = isNegative ? BridgeConfig.negativeCacheExpiry : BridgeConfig.cacheExpiry;
+                        if (Date.now() - timestamp >= expiry && typeof GM_deleteValue === 'function') {
+                            GM_deleteValue(key);
+                        }
+                    } catch {
+                        if (typeof GM_deleteValue === 'function') GM_deleteValue(key);
+                    }
+                }
+            } catch {
+                // 忽略清理异常
+            }
+        }
+    };
+
+    const BridgeExtractor = {
+        getMetaOgImage() {
+            const meta = document.querySelector('meta[property="og:image"], meta[name="og:image"]');
+            const content = meta ? meta.getAttribute('content') : '';
+            return content && /^https?:\/\//i.test(content) ? content : '';
+        },
+
+        getMetaOgTitle() {
+            const meta = document.querySelector('meta[property="og:title"], meta[name="og:title"]');
+            return meta ? (meta.getAttribute('content') || '').trim() : '';
+        },
+
+        fromMissAVUrl() {
+            const cleanPath = window.location.pathname.replace(/^\/(cn|en|ja|ko|tw)\//i, '/');
+            const segments = cleanPath.split('/').filter(Boolean);
+            const rawCode = segments[segments.length - 1];
+            if (!rawCode) return null;
+            const codeMatch = rawCode.match(/^(.*?\d+)/i);
+            return codeMatch ? codeMatch[1].toUpperCase() : null;
+        },
+
+        fromJableUrl() {
+            const match = window.location.pathname.match(/\/videos\/([^/]+)/);
+            if (!match || !match[1]) return null;
+            const codeMatch = match[1].match(/^(.*?\d+)/i);
+            return codeMatch ? codeMatch[1].toUpperCase() : null;
+        },
+
+        fromJavDBPage() {
+            const panelBlocks = document.querySelectorAll('.panel-block');
+            let code = '';
+            let targetBlock = null;
+            for (const block of panelBlocks) {
+                if (block.textContent.includes('番號') || block.textContent.includes('ID')) {
+                    const valueSpan = block.querySelector('.value');
+                    if (valueSpan) {
+                        code = valueSpan.textContent.trim().toUpperCase();
+                        targetBlock = block;
+                        break;
+                    }
+                }
+            }
+            if (!code || !targetBlock) return null;
+
+            const titleEl = document.querySelector('h2.title strong, h2.title, .title.is-4');
+            const title = (titleEl?.textContent || document.title || code).trim();
+            const coverImg = document.querySelector('img.video-cover, .column-video-cover img');
+            const coverUrl = (coverImg && /^https?:\/\//i.test(coverImg.src))
+                ? coverImg.src
+                : this.getMetaOgImage();
+
+            // 提取页面上的磁力链接列表（优先中字/首条）
+            const magnetRows = [];
+            document.querySelectorAll('#magnets-content .item').forEach(row => {
+                const anchor = row.querySelector('a[href^="magnet:"]');
+                if (!anchor || !anchor.href) return;
+                const nameEl = row.querySelector('.name');
+                const metaEl = row.querySelector('.meta');
+                const dateEl = row.querySelector('.date');
+                const tagsText = Array.from(row.querySelectorAll('.tag')).map(t => t.textContent.trim()).join(' ');
+                const rowTitle = (nameEl?.textContent || title || code).trim();
+                const metaText = (metaEl?.textContent || '').trim();
+                const sizeMatch = metaText.match(/[\d.]+\s*(?:GB|MB|KB|TB)/i);
+                magnetRows.push({
+                    rowEl: row,
+                    code,
+                    title: `${code} ${rowTitle}`.trim(),
+                    magnet: anchor.href,
+                    size: sizeMatch ? sizeMatch[0] : (metaText || '未知'),
+                    date: (dateEl?.textContent || '').trim() || '未知',
+                    hasSub: /字幕|中字/i.test(tagsText + ' ' + rowTitle)
+                });
+            });
+
+            const preferredMagnet = magnetRows.find(r => r.hasSub) || magnetRows[0] || null;
+
+            return {
+                code,
+                targetBlock,
+                title,
+                coverUrl,
+                magnetRows,
+                preferredData: preferredMagnet || {
+                    code,
+                    title,
+                    magnet: '',
+                    size: 'JavDB 详情',
+                    date: '未知'
+                }
+            };
+        }
+    };
+
+    const BridgeJavDBLookup = {
+        async fetchRealUrl(code) {
+            const cached = BridgeCache.get(code);
+            if (cached) {
+                if (cached.isNegative) {
+                    return {
+                        success: false,
+                        fallbackUrl: `${BridgeConfig.javdbBaseUrl}/search?q=${encodeURIComponent(code)}&f=all`,
+                        fromCache: true
+                    };
+                }
+                return { success: true, url: cached.url, fromCache: true };
+            }
+
+            const searchUrl = `${BridgeConfig.javdbBaseUrl}/search?q=${encodeURIComponent(code)}&f=all`;
+            try {
+                const response = await gmRequest(searchUrl, {
+                    method: 'GET',
+                    timeout: 10000
+                });
+                if (response.status !== 200) {
+                    return { success: false, error: `HTTP ${response.status}` };
+                }
+                const html = await response.text();
+                const doc = new DOMParser().parseFromString(html, 'text/html');
+                if (!doc.querySelector('.movie-list') && !doc.title.includes('JavDB')) {
+                    return { success: false, error: '安全拦截或页面异常' };
+                }
+                const firstResult = doc.querySelector('.movie-list a.box');
+                if (!firstResult) {
+                    BridgeCache.setNotFound(code);
+                    return { success: false, fallbackUrl: searchUrl };
+                }
+
+                const resultTitle = firstResult.querySelector('.video-title strong, strong');
+                const resultCode = resultTitle ? resultTitle.textContent.trim().toUpperCase() : '';
+                const regex = new RegExp(`\\b${Utils.escapeRegExp(code.toUpperCase())}\\b`, 'i');
+                const pureResult = resultCode.replace(/[^A-Z0-9]/ig, '');
+                const pureCode = code.toUpperCase().replace(/[^A-Z0-9]/ig, '');
+
+                if (regex.test(resultCode) || pureResult === pureCode) {
+                    const href = firstResult.getAttribute('href');
+                    const realUrl = `${BridgeConfig.javdbBaseUrl}${href}`;
+                    BridgeCache.set(code, realUrl);
+                    return { success: true, url: realUrl };
+                }
+
+                BridgeCache.setNotFound(code);
+                return { success: false, fallbackUrl: searchUrl };
+            } catch (err) {
+                return { success: false, error: err?.message || '网络异常' };
+            }
+        }
+    };
+
+    const BridgePageHandler = {
+        createLinkBtn(text, url, variant, tooltip = '') {
+            const a = document.createElement('a');
+            a.href = url;
+            a.target = '_blank';
+            a.rel = 'noopener noreferrer';
+            a.className = `tk-bridge-btn tk-bridge-btn--${variant}`;
+            a.textContent = text;
+            if (tooltip) a.title = tooltip;
+            return a;
+        },
+
+        createFavBtn(data, coverUrl, isRowBtn = false) {
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            const favKey = FavoritesManager.buildKey(data) + (isRowBtn ? ':row' : ':main');
+            state.bridgeFavDataMap.set(favKey, data);
+            btn.dataset.tkBridgeKey = favKey;
+            btn.className = isRowBtn
+                ? 'tk-bridge-row-fav'
+                : 'tk-bridge-btn tk-bridge-fav-btn';
+            FavoritesManager.applyButtonState(btn, data);
+            btn.addEventListener('click', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                CardFactory.handleFavButtonClick(btn, data, coverUrl);
+            });
+            return btn;
+        },
+
+        bindJavdbLookup(btn, code) {
+            let retryCount = 0;
+            const MAX_RETRIES = 3;
+
+            const runLookup = async () => {
+                btn.className = 'tk-bridge-btn tk-bridge-btn--loading';
+                btn.textContent = '⏳ JavDB...';
+                const res = await BridgeJavDBLookup.fetchRealUrl(code);
+                if (res.success) {
+                    btn.href = res.url;
+                    btn.className = 'tk-bridge-btn tk-bridge-btn--javdb';
+                    btn.textContent = '▶ JavDB 直达';
+                    btn.title = res.fromCache ? '从缓存加载 JavDB 详情页' : '已定位 JavDB 详情页';
+                    btn.onclick = null;
+                } else if (res.fallbackUrl) {
+                    btn.href = res.fallbackUrl;
+                    btn.className = 'tk-bridge-btn tk-bridge-btn--search';
+                    btn.textContent = '🔍 JavDB 搜索';
+                    btn.title = '未匹配直达详情，点击去 JavDB 搜索';
+                    btn.onclick = null;
+                } else if (retryCount >= MAX_RETRIES) {
+                    btn.href = `${BridgeConfig.javdbBaseUrl}/search?q=${encodeURIComponent(code)}&f=all`;
+                    btn.className = 'tk-bridge-btn tk-bridge-btn--error';
+                    btn.textContent = '🔍 JavDB 搜索';
+                    btn.title = '请求受限，点击手动搜索';
+                    btn.onclick = null;
+                } else {
+                    retryCount++;
+                    btn.className = 'tk-bridge-btn tk-bridge-btn--error';
+                    btn.textContent = `↻ JavDB (${retryCount}/${MAX_RETRIES})`;
+                    btn.title = res.error || '点击重试查询';
+                    btn.onclick = (e) => {
+                        e.preventDefault();
+                        runLookup();
+                    };
+                }
+            };
+
+            runLookup();
+        },
+
+        handleJavDB() {
+            if (!/^\/v\//i.test(window.location.pathname)) return;
+            const info = BridgeExtractor.fromJavDBPage();
+            if (!info) return;
+            const { code, targetBlock, coverUrl, magnetRows, preferredData } = info;
+            if (targetBlock.querySelector('.tk-bridge-bar')) return;
+
+            const bar = document.createElement('span');
+            bar.className = 'tk-bridge-bar';
+
+            const missavBase = BridgeConfig.getMissavBaseUrl();
+            bar.appendChild(this.createLinkBtn('▶ MissAV', `${missavBase}/${code.toLowerCase()}`, 'missav', '直达 MissAV 播放页'));
+            bar.appendChild(this.createLinkBtn('▶ Jable', `${BridgeConfig.jableBaseUrl}/videos/${code.toLowerCase()}/`, 'jable', '直达 Jable 播放页'));
+            bar.appendChild(this.createLinkBtn('🔍 MissAV搜', `${missavBase}/search/${encodeURIComponent(code)}`, 'search', '在 MissAV 搜索'));
+            bar.appendChild(this.createLinkBtn('🧲 TorrentKitty', BridgeConfig.getTorrentKittySearchUrl(code), 'tk', '前往 TorrentKitty 搜索磁力'));
+            bar.appendChild(this.createFavBtn(preferredData, coverUrl, false));
+
+            targetBlock.appendChild(bar);
+
+            // 在 JavDB 磁力列表每一行旁也挂载独立收藏按钮，支持精确收藏指定磁力版本
+            magnetRows.forEach(item => {
+                if (!item.rowEl || item.rowEl.querySelector('.tk-bridge-row-fav')) return;
+                const nameWrap = item.rowEl.querySelector('.magnet-name') || item.rowEl;
+                nameWrap.appendChild(this.createFavBtn(item, coverUrl, true));
+            });
+
+            BridgeCache.set(code, window.location.href);
+        },
+
+        handleMissAV() {
+            const code = BridgeExtractor.fromMissAVUrl();
+            if (!code) return;
+            const titleEl = document.querySelector('h1');
+            if (!titleEl || titleEl.querySelector('.tk-bridge-bar')) return;
+
+            const slugs = typeof MissAVService !== 'undefined' ? MissAVService.buildSlugCandidates(code) : [code.toLowerCase()];
+            const hdCover = slugs.length > 0 && typeof MissAVService !== 'undefined'
+                ? MissAVService.getCoverUrl(slugs[0], 'cover-n.jpg')
+                : '';
+            const coverUrl = hdCover || BridgeExtractor.getMetaOgImage();
+            const title = (titleEl.textContent || BridgeExtractor.getMetaOgTitle() || code).trim();
+
+            const bar = document.createElement('span');
+            bar.className = 'tk-bridge-bar';
+
+            bar.appendChild(this.createLinkBtn('▶ Jable', `${BridgeConfig.jableBaseUrl}/videos/${code.toLowerCase()}/`, 'jable', '直达 Jable 播放页'));
+            const javdbBtn = this.createLinkBtn('⏳ JavDB...', `${BridgeConfig.javdbBaseUrl}/search?q=${encodeURIComponent(code)}&f=all`, 'loading');
+            bar.appendChild(javdbBtn);
+            bar.appendChild(this.createLinkBtn('🧲 TorrentKitty', BridgeConfig.getTorrentKittySearchUrl(code), 'tk', '前往 TorrentKitty 搜索磁力'));
+            bar.appendChild(this.createFavBtn({
+                code,
+                title,
+                magnet: '',
+                size: 'MissAV',
+                date: '未知'
+            }, coverUrl, false));
+
+            titleEl.appendChild(bar);
+            this.bindJavdbLookup(javdbBtn, code);
+        },
+
+        handleJable() {
+            if (!/^\/videos\//i.test(window.location.pathname)) return;
+            const code = BridgeExtractor.fromJableUrl();
+            if (!code) return;
+            if (document.querySelector('.tk-bridge-bar')) return;
+
+            let titleEl = null;
+            for (const sel of ['.header-left h4', '.video-info h1', '.video-detail h1', '.video-title', '.header-right h4']) {
+                const el = document.querySelector(sel);
+                if (el && el.textContent.toUpperCase().includes(code)) {
+                    titleEl = el;
+                    break;
+                }
+            }
+            if (!titleEl) {
+                for (const h of document.querySelectorAll('h1, h2, h3, h4, h5')) {
+                    if (h.textContent && h.textContent.toUpperCase().includes(code)) {
+                        titleEl = h;
+                        break;
+                    }
+                }
+            }
+
+            const videoEl = document.querySelector('video#player, video');
+            const coverUrl = BridgeExtractor.getMetaOgImage() || (videoEl && videoEl.poster) || '';
+            const title = (titleEl?.textContent || BridgeExtractor.getMetaOgTitle() || code).trim();
+
+            const bar = document.createElement('div');
+            bar.className = 'tk-bridge-bar';
+
+            const missavBase = BridgeConfig.getMissavBaseUrl();
+            bar.appendChild(this.createLinkBtn('▶ MissAV', `${missavBase}/${code.toLowerCase()}`, 'missav', '直达 MissAV 播放页'));
+            const javdbBtn = this.createLinkBtn('⏳ JavDB...', `${BridgeConfig.javdbBaseUrl}/search?q=${encodeURIComponent(code)}&f=all`, 'loading');
+            bar.appendChild(javdbBtn);
+            bar.appendChild(this.createLinkBtn('🧲 TorrentKitty', BridgeConfig.getTorrentKittySearchUrl(code), 'tk', '前往 TorrentKitty 搜索磁力'));
+            bar.appendChild(this.createFavBtn({
+                code,
+                title,
+                magnet: '',
+                size: 'Jable',
+                date: '未知'
+            }, coverUrl, false));
+
+            if (titleEl) {
+                titleEl.appendChild(bar);
+            } else {
+                const playerBox = document.querySelector('.video-info, .video-detail, .player-box, #player, .player-container');
+                if (playerBox) {
+                    bar.classList.add('tk-bridge-bar--block');
+                    playerBox.insertAdjacentElement('afterend', bar);
+                } else {
+                    bar.classList.add('tk-bridge-bar--floating');
+                    document.body.appendChild(bar);
+                }
+            }
+
+            this.bindJavdbLookup(javdbBtn, code);
+        }
+    };
+
+    const BridgeApp = {
+        _initialized: false,
+
+        ensureFloatingFavBar() {
+            if (document.getElementById('tk-fav-floating-bar')) return;
+            const floatBar = document.createElement('div');
+            floatBar.id = 'tk-fav-floating-bar';
+            floatBar.className = 'tk-fav-floating-bar is-visible is-bridge-site';
+            floatBar.innerHTML = `
+                <button type="button" class="tk-fav-float-btn" id="tk-fav-float-btn" title="打开跨站私有收藏夹">⭐ 收藏夹 (<span id="tk-fav-float-count">0</span>)</button>
+                <button type="button" class="tk-fav-float-top" id="tk-fav-float-top" title="回到顶部">↑</button>
+            `;
+            document.body.appendChild(floatBar);
+
+            document.getElementById('tk-fav-float-btn').onclick = () => ModalManager.showFavorites();
+            document.getElementById('tk-fav-float-top').onclick = () => {
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            };
+        },
+
+        route() {
+            const site = SiteDetector.detect();
+            if (site === 'javdb') {
+                BridgePageHandler.handleJavDB();
+            } else if (site === 'missav') {
+                if (typeof GM_getValue === 'function' && typeof GM_setValue === 'function') {
+                    if (GM_getValue('missav_origin') !== window.location.origin) {
+                        GM_setValue('missav_origin', window.location.origin);
+                    }
+                }
+                BridgePageHandler.handleMissAV();
+            } else if (site === 'jable') {
+                BridgePageHandler.handleJable();
+            }
+        },
+
+        setupSpaObserver() {
+            let lastUrl = window.location.href;
+            const onUrlChange = () => {
+                if (window.location.href !== lastUrl) {
+                    lastUrl = window.location.href;
+                    setTimeout(() => this.route(), 500);
+                }
+            };
+
+            const origPush = history.pushState;
+            history.pushState = function () {
+                const ret = origPush.apply(this, arguments);
+                onUrlChange();
+                return ret;
+            };
+
+            const origReplace = history.replaceState;
+            history.replaceState = function () {
+                const ret = origReplace.apply(this, arguments);
+                onUrlChange();
+                return ret;
+            };
+
+            window.addEventListener('popstate', onUrlChange);
+            setInterval(() => {
+                this.ensureFloatingFavBar();
+                if (!document.querySelector('.tk-bridge-bar')) {
+                    this.route();
+                }
+            }, 2000);
+        },
+
+        init() {
+            if (this._initialized) return;
+            this._initialized = true;
+
+            StyleUtils.injectGlobalStyles();
+            SettingsManager.load();
+            FavoritesManager.init();
+            if (typeof SyncEngine !== 'undefined') {
+                SyncEngine.init();
+                if (SyncEngine.isConfigured()) {
+                    setTimeout(() => SyncEngine.syncNow({ reason: 'bridge-startup' }), 800);
+                }
+            }
+            if (Math.random() < 0.05) {
+                BridgeCache.cleanup();
+            }
+
+            this.ensureFloatingFavBar();
+            FavoritesManager.syncUI();
+            this.route();
+            this.setupSpaObserver();
+
+            console.log(
+                `%c [TK_CROSS_SITE_BRIDGE] %c VER_${VERSION} %c ${SiteDetector.detect().toUpperCase()} `,
+                'background: #186459; color: #fcf8ef; font-weight: bold; border-radius: 4px 0 0 4px; padding: 2px 6px;',
+                'background: #f3ecdc; color: #192630; border: 1px solid #186459; border-left: none; border-right: none; padding: 1px 6px; font-family: monospace;',
+                'background: #805816; color: #fcf8ef; font-weight: bold; border-radius: 0 4px 4px 0; padding: 2px 6px;'
+            );
+        }
+    };
+
     // ==================== 主逻辑 ====================
     const CF_VERIFY_WINDOW_NAME = 'tk_cf_verify';
 
@@ -8279,6 +8999,12 @@
         },
 
         init() {
+            document.documentElement.classList.add('tk-site-torrentkitty');
+            if (typeof GM_setValue === 'function') {
+                try {
+                    GM_setValue('tk_preferred_origin', window.location.origin);
+                } catch {}
+            }
             StyleUtils.injectGlobalStyles();
             SettingsManager.load();
             JavDBService.loadCircuitState();
@@ -8391,14 +9117,23 @@
         }
     };
 
-    if (window.name === CF_VERIFY_WINDOW_NAME) {
-        console.log('[TorrentKitty] 当前为 Cloudflare 验证小窗，跳过网格渲染以加快验证完成');
-    } else if (document.readyState === 'loading') {
-        document.addEventListener('DOMContentLoaded', () => App.init(), { once: true });
-    } else {
-        App.init();
-    }
+    const currentSite = typeof SiteDetector !== 'undefined' ? SiteDetector.detect() : 'torrentkitty';
 
-    window.addEventListener('beforeunload', () => App.cleanup());
+    if (currentSite === 'torrentkitty') {
+        if (window.name === CF_VERIFY_WINDOW_NAME) {
+            console.log('[TorrentKitty] 当前为 Cloudflare 验证小窗，跳过网格渲染以加快验证完成');
+        } else if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => App.init(), { once: true });
+        } else {
+            App.init();
+        }
+        window.addEventListener('beforeunload', () => App.cleanup());
+    } else if (['javdb', 'missav', 'jable'].includes(currentSite) && typeof BridgeApp !== 'undefined') {
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => BridgeApp.init(), { once: true });
+        } else {
+            BridgeApp.init();
+        }
+    }
 
 })();
