@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      4.9.5
-// @description  TorrentKitty 增强：卡片化网格浏览流、版本标签识别、无缝大图日志抽屉、自动补充排队加载 (Organic 配色版)
+// @version      4.9.8
+// @description  TorrentKitty 增强：卡片化网格浏览流、JAV321(DMM原图)/MissAV高清/JavDB三源封面分摊与风控熔断、版本标签识别、大图抽屉、CF小窗过盾 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
 // @match        *://torrentkitty.tv/*
@@ -36,6 +36,9 @@
 // @grant        GM_setClipboard
 // @connect      javdb.com
 // @connect      jdbstatic.com
+// @connect      fourhoi.com
+// @connect      www.jav321.com
+// @connect      jav321.com
 // @connect      torrentkitty.tv
 // @connect      torrentkitty.com
 // @connect      torrentkitty.io
@@ -291,19 +294,22 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.5';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '4.9.8';
 
     const CONFIG = {
         defaults: {
             coverWidth: 280,
             pageMaxWidth: 1200,
-            maxPagesToFetch: 10
+            maxPagesToFetch: 10,
+            coverSourceMode: 'jav321_first'
         },
         queue: {
-            baseDelay: 1500,
-            minRandomDelay: 500,
-            maxRandomDelay: 1500,
-            maxRequestsPerMinute: 24,
+            baseDelay: 2500,
+            minRandomDelay: 800,
+            maxRandomDelay: 2200,
+            maxRequestsPerMinute: 12,
+            missavDelay: 120,
+            jav321Delay: 350,
             errorBackoff: 5000,
             maxBackoff: 60000,
             maxTaskRetries: 2
@@ -933,6 +939,17 @@
                     background: #114d45;
                 }
 
+                #tk-status-banner .tk-toolbar-btn--secondary {
+                    background: rgba(255, 255, 255, 0.72);
+                    color: var(--tk-text-main);
+                    border-color: var(--tk-card-border);
+                }
+
+                #tk-status-banner .tk-toolbar-btn--secondary:hover {
+                    background: rgba(255, 255, 255, 0.95);
+                    border-color: var(--tk-primary);
+                }
+
                 /* 右侧抽屉 */
                 .tk-drawer-overlay {
                     position: fixed;
@@ -1090,7 +1107,12 @@
         debugInfoMap: new Map(),     // code -> debugInfo（替代隐藏 DOM 寄生）
         dispatchedCodes: new Set(),  // 已派发/已完成封面请求的番号集合，避免同番号重复请求
         requestQueue: [],
+        missavQueue: [],
+        jav321Queue: [],
         isProcessing: false,
+        isProcessingMissav: false,
+        isProcessingJav321: false,
+        taskCounter: 0,
         isFetchingPage: false,
         settings: { ...CONFIG.defaults },
         excludeKeywords: typeof GM_getValue === 'function' ? GM_getValue('tk_exclude_keywords', []) : [],
@@ -1107,6 +1129,8 @@
         hadProcessedRows: false,
         rowSeq: 0,
         isPausedForLogin: false,
+        javdbBlockedUntil: 0,
+        javdbBlockedMessage: '',
         javdbSuccessCount: 0,
         javdbConsecutiveMisses: 0,
         failedCodesForRetry: new Set(),
@@ -1114,6 +1138,8 @@
     };
 
     // ==================== 设置管理 ====================
+    const VALID_COVER_SOURCE_MODES = ['jav321_first', 'missav_first', 'balanced', 'javdb_first', 'no_javdb', 'missav_only'];
+
     const SettingsManager = {
         load() {
             const saved = GM_getValue(CONFIG.storageKey, null);
@@ -1121,6 +1147,12 @@
                 try {
                     const parsed = typeof saved === 'string' ? JSON.parse(saved) : saved;
                     state.settings = { ...CONFIG.defaults, ...parsed };
+                    if (state.settings.coverSourceMode === 'missav_only') {
+                        state.settings.coverSourceMode = 'no_javdb';
+                    }
+                    if (!VALID_COVER_SOURCE_MODES.includes(state.settings.coverSourceMode)) {
+                        state.settings.coverSourceMode = CONFIG.defaults.coverSourceMode;
+                    }
                 } catch (e) {
                     console.error('[TorrentKitty] 加载设置失败:', e);
                 }
@@ -1405,13 +1437,162 @@
         }
     };
 
-    // ==================== 请求队列管理 ====================
+    // ==================== 请求队列与三源协同协调器 ====================
     const QueueManager = {
+        getMode() {
+            const mode = state.settings.coverSourceMode || CONFIG.defaults.coverSourceMode || 'jav321_first';
+            return mode === 'missav_only' ? 'no_javdb' : mode;
+        },
+
+        createDebugInfo(code, mode = this.getMode()) {
+            const existing = state.debugInfoMap.get(code);
+            if (existing) {
+                existing.mode = mode;
+                return existing;
+            }
+            return {
+                code,
+                mode,
+                timestamp: new Date().toISOString(),
+                coverSource: '',
+                jav321Tried: false,
+                jav321Status: '未请求',
+                jav321Url: '',
+                missavTried: false,
+                missavStatus: '未请求',
+                missavUrl: MissAVService.getPageUrl(code),
+                javdbTried: false,
+                fetchUrl: '',
+                fetchStatus: '未请求',
+                foundResult: false,
+                javdbUrl: '',
+                coverId: '',
+                coverUrl: '',
+                fallbackCoverUrl: '',
+                errorMessage: ''
+            };
+        },
+
+        buildPipeline(mode) {
+            if (mode === 'no_javdb') {
+                return ['jav321', 'missav'];
+            }
+            if (mode === 'missav_first') {
+                return ['missav', 'jav321', 'javdb'];
+            }
+            if (mode === 'javdb_first') {
+                return ['javdb', 'jav321', 'missav'];
+            }
+            if (mode === 'balanced') {
+                const idx = state.taskCounter++;
+                return idx % 2 === 0
+                    ? ['jav321', 'missav', 'javdb']
+                    : ['missav', 'jav321', 'javdb'];
+            }
+            // 默认 jav321_first：JAV321(DMM原图) -> MissAV高清 -> JavDB兜底
+            return ['jav321', 'missav', 'javdb'];
+        },
+
+        isSourceAvailable(source, mode = this.getMode()) {
+            if (source === 'javdb') {
+                return mode !== 'no_javdb' && !state.isPausedForLogin && !JavDBService.isCircuitBroken();
+            }
+            return true;
+        },
+
+        isCacheUsable(cached, mode) {
+            if (!cached) return false;
+            // 自动淘汰上一版本缓存的低清 MissAV cover-t.jpg，刷新为 800x538 高清图
+            if (cached.coverUrl && cached.coverUrl.includes('/cover-t.jpg')) {
+                return false;
+            }
+            if (cached.coverUrl || cached.coverId) return true;
+
+            // 对旧空缓存或之前仅部分源失败的记录：只要还有当前策略下未尝试且可用的源，允许重拉
+            if (!cached.triedMissav) return false;
+            if (!cached.triedJav321) return false;
+            if (cached.isError && this.isSourceAvailable('javdb', mode) && !cached.triedJavdb) {
+                return false;
+            }
+            return true;
+        },
+
         add(code) {
             if (!code || state.dispatchedCodes.has(code)) return;
             state.dispatchedCodes.add(code);
-            state.requestQueue.push({ code, retries: 0 });
-            this.process();
+
+            const mode = this.getMode();
+            const cached = CacheManager.get(code);
+            if (this.isCacheUsable(cached, mode)) {
+                const debugInfo = cached.debugInfo || this.createDebugInfo(code, mode);
+                if (cached.coverSource === 'javdb' || cached.coverId) {
+                    state.javdbSuccessCount++;
+                }
+                state.debugInfoMap.set(code, debugInfo);
+                UIUpdater.updateCode(code, debugInfo, cached);
+                return;
+            }
+            if (cached) {
+                CacheManager.remove(code);
+            }
+
+            const debugInfo = this.createDebugInfo(code, mode);
+            state.debugInfoMap.set(code, debugInfo);
+
+            const task = {
+                code,
+                pipeline: this.buildPipeline(mode),
+                nextIndex: 0,
+                retries: 0
+            };
+            this.advanceTask(task, debugInfo, { prepend: false });
+        },
+
+        advanceTask(task, debugInfo, { prepend = false } = {}) {
+            const mode = this.getMode();
+            let chosen = null;
+
+            while (task.nextIndex < task.pipeline.length) {
+                const candidate = task.pipeline[task.nextIndex++];
+                if (candidate === 'jav321' && debugInfo.jav321Tried) continue;
+                if (candidate === 'missav' && debugInfo.missavTried) continue;
+                if (candidate === 'javdb' && (debugInfo.javdbTried || !this.isSourceAvailable('javdb', mode))) continue;
+                chosen = candidate;
+                break;
+            }
+
+            if (!chosen) {
+                let fallbackLabel = '[多源均未收录]';
+                let isError = false;
+                if (JavDBService.isCircuitBroken() && !debugInfo.javdbTried && mode !== 'no_javdb') {
+                    fallbackLabel = '[未收录 / JavDB熔断]';
+                    isError = true;
+                } else if (state.isPausedForLogin && !debugInfo.javdbTried && mode !== 'no_javdb') {
+                    fallbackLabel = '[未收录 / JavDB需登录]';
+                    isError = true;
+                } else if (debugInfo.errorMessage) {
+                    fallbackLabel = `[${debugInfo.errorMessage}]`;
+                    isError = Boolean(!debugInfo.missavTried || !debugInfo.jav321Tried);
+                }
+                this.commitFailure(task.code, debugInfo, { fallbackLabel, isError });
+                return;
+            }
+
+            if (chosen === 'jav321') {
+                if (prepend) state.jav321Queue.unshift(task);
+                else state.jav321Queue.push(task);
+                this.processJav321();
+            } else if (chosen === 'missav') {
+                if (prepend) state.missavQueue.unshift(task);
+                else state.missavQueue.push(task);
+                this.processMissav();
+            } else {
+                task.retries = 0;
+                if (prepend) state.requestQueue.unshift(task);
+                else state.requestQueue.push(task);
+                this.process();
+            }
+            UIUpdater.refreshDrawerLogs(task.code, debugInfo);
         },
 
         getNextDelay() {
@@ -1450,49 +1631,251 @@
             state.currentBackoff = 0;
         },
 
+        commitSuccess(code, debugInfo, payload) {
+            state.failedCodesForRetry.delete(code);
+            state.debugInfoMap.set(code, debugInfo);
+            CacheManager.set(code, payload);
+            UIUpdater.updateCode(code, debugInfo, payload);
+        },
+
+        commitFailure(code, debugInfo, { fallbackLabel = '[未收录]', isError = false, cacheResult = true } = {}) {
+            state.failedCodesForRetry.add(code);
+            const payload = {
+                url: null,
+                javdbSearchUrl: JavDBService.getSearchUrl(code),
+                coverId: null,
+                coverUrl: null,
+                fallbackCoverUrl: '',
+                coverSource: 'none',
+                triedJav321: Boolean(debugInfo.jav321Tried),
+                triedMissav: Boolean(debugInfo.missavTried),
+                triedJavdb: Boolean(debugInfo.javdbTried),
+                debugInfo,
+                ...(isError ? { isError: true, errorExpiry: Date.now() + CONFIG.errorCacheExpiry } : {})
+            };
+            state.debugInfoMap.set(code, debugInfo);
+            if (cacheResult) {
+                CacheManager.set(code, payload);
+            }
+            UIUpdater.updateCode(code, debugInfo, {
+                ...payload,
+                fallbackLabel
+            });
+        },
+
+        checkQueueCompletion() {
+            const allDone = !state.isProcessing
+                && !state.isProcessingMissav
+                && !state.isProcessingJav321
+                && state.requestQueue.length === 0
+                && state.missavQueue.length === 0
+                && state.jav321Queue.length === 0;
+            if (allDone && typeof App !== 'undefined' && App.showStatusBanner) {
+                const banner = document.getElementById('tk-status-banner');
+                if (banner && (banner.textContent.includes('正在异步') || banner.textContent.includes('排队加载') || banner.textContent.includes('正在重试拉取'))) {
+                    const msg = JavDBService.isCircuitBroken()
+                        ? '高清封面加载完成（JavDB 熔断保护中）'
+                        : '封面数据全部加载完成！';
+                    App.showStatusBanner(msg, true);
+                }
+            }
+        },
+
+        drainJavdbQueue(reasonLabel) {
+            if (state.requestQueue.length === 0) return;
+            const pending = state.requestQueue.splice(0, state.requestQueue.length);
+            pending.forEach(item => {
+                const debugInfo = this.createDebugInfo(item.code);
+                if (!debugInfo.errorMessage && reasonLabel) {
+                    debugInfo.errorMessage = reasonLabel;
+                }
+                this.advanceTask(item, debugInfo);
+            });
+        },
+
+        showSuspendedNotice(resumeText = '') {
+            if (typeof GridContainer === 'undefined' || !GridContainer.showJavdbNotice) return;
+            const resumeHint = resumeText ? `（预计 ${resumeText} 恢复）` : '';
+            GridContainer.showJavdbNotice({
+                level: 'warning',
+                message: `检测到 JavDB 账号被临时停用${resumeHint}，已自动熔断 JavDB 请求并由 JAV321/MissAV 高清源接管。`,
+                showLoginLink: true,
+                showRetry: false,
+                showResetCircuit: true,
+                showUseMissavOnly: this.getMode() !== 'no_javdb'
+            });
+        },
+
+        requeueCodes(codes) {
+            if (!codes || codes.length === 0) return 0;
+            const mode = this.getMode();
+            const queuedCodes = new Set([
+                ...state.requestQueue.map(i => i.code),
+                ...state.missavQueue.map(i => i.code),
+                ...state.jav321Queue.map(i => i.code)
+            ]);
+            let count = 0;
+
+            for (let i = codes.length - 1; i >= 0; i--) {
+                const code = codes[i];
+                const cached = CacheManager.get(code);
+                if (cached && (!(cached.coverUrl || cached.coverId) || cached.isError)) {
+                    CacheManager.remove(code);
+                }
+                if (queuedCodes.has(code)) continue;
+                queuedCodes.add(code);
+
+                const debugInfo = this.createDebugInfo(code, mode);
+                debugInfo.jav321Tried = false;
+                debugInfo.missavTried = false;
+                debugInfo.javdbTried = false;
+                debugInfo.errorMessage = '';
+
+                const task = {
+                    code,
+                    pipeline: this.buildPipeline(mode),
+                    nextIndex: 0,
+                    retries: 0
+                };
+                this.advanceTask(task, debugInfo, { prepend: true });
+                count++;
+            }
+
+            return count;
+        },
+
         resumeAfterLogin() {
             state.isPausedForLogin = false;
             this.resetError();
             state.javdbConsecutiveMisses = 0;
 
-            const queuedSet = new Set(state.requestQueue.map(item => item.code));
             const codesToRetry = Array.from(state.failedCodesForRetry);
             state.failedCodesForRetry.clear();
-
-            // 逆序插回队首，保持原有顺序优先重试
-            for (let i = codesToRetry.length - 1; i >= 0; i--) {
-                const code = codesToRetry[i];
-                const cached = CacheManager.get(code);
-                if (cached && (!cached.coverId || cached.isError)) {
-                    CacheManager.remove(code);
-                }
-                if (!queuedSet.has(code)) {
-                    state.requestQueue.unshift({ code, retries: 0 });
-                    queuedSet.add(code);
-                }
-            }
 
             if (typeof GridContainer !== 'undefined' && GridContainer.hideJavdbNotice) {
                 GridContainer.hideJavdbNotice();
             }
-            if (typeof App !== 'undefined' && App.showStatusBanner && state.requestQueue.length > 0) {
-                App.showStatusBanner(`正在重试拉取封面数据（剩余 ${state.requestQueue.length} 项）...`, true);
+
+            const queuedCount = this.requeueCodes(codesToRetry);
+            if (typeof App !== 'undefined' && App.showStatusBanner && queuedCount > 0) {
+                App.showStatusBanner(`正在重试拉取封面数据（剩余 ${queuedCount} 项）...`, true);
             }
-            this.process();
         },
 
-        async process() {
-            if (state.isPausedForLogin) {
+        resetCircuitAndRetry() {
+            JavDBService.clearCircuitBreaker();
+            this.resumeAfterLogin();
+        },
+
+        onSettingsChanged() {
+            const mode = this.getMode();
+            if (mode === 'no_javdb') {
+                this.drainJavdbQueue('已切换为零 JavDB 模式');
+            }
+            const retryCodes = Array.from(state.failedCodesForRetry);
+            if (retryCodes.length > 0) {
+                state.failedCodesForRetry.clear();
+                this.requeueCodes(retryCodes);
+            }
+        },
+
+        async processJav321() {
+            if (state.isProcessingJav321 || state.jav321Queue.length === 0) {
+                this.checkQueueCompletion();
                 return;
             }
 
-            if (state.isProcessing || state.requestQueue.length === 0) {
-                if (!state.isProcessing && state.requestQueue.length === 0 && typeof App !== 'undefined' && App.showStatusBanner) {
-                    const banner = document.getElementById('tk-status-banner');
-                    if (banner && (banner.textContent.includes('正在异步') || banner.textContent.includes('排队加载') || banner.textContent.includes('正在重试拉取'))) {
-                        App.showStatusBanner('封面数据全部加载完成！', true);
-                    }
+            state.isProcessingJav321 = true;
+            const task = state.jav321Queue.shift();
+            const debugInfo = this.createDebugInfo(task.code);
+
+            try {
+                const res = await JAV321Service.fetchCover(task.code, debugInfo);
+                if (res.found) {
+                    const payload = {
+                        url: null,
+                        javdbSearchUrl: JavDBService.getSearchUrl(task.code),
+                        jav321Url: res.jav321Url || '',
+                        coverId: null,
+                        coverUrl: res.coverUrl,
+                        fallbackCoverUrl: res.fallbackCoverUrl || '',
+                        coverSource: 'jav321',
+                        triedJav321: true,
+                        triedMissav: Boolean(debugInfo.missavTried),
+                        triedJavdb: Boolean(debugInfo.javdbTried),
+                        debugInfo
+                    };
+                    this.commitSuccess(task.code, debugInfo, payload);
+                } else {
+                    this.advanceTask(task, debugInfo);
                 }
+            } catch (e) {
+                console.error('[TorrentKitty] JAV321 队列处理错误:', e);
+                debugInfo.jav321Status = e.message || '请求出错';
+                this.advanceTask(task, debugInfo);
+            }
+
+            const delay = CONFIG.queue.jav321Delay || 350;
+            setTimeout(() => {
+                state.isProcessingJav321 = false;
+                this.processJav321();
+            }, delay);
+        },
+
+        async processMissav() {
+            if (state.isProcessingMissav || state.missavQueue.length === 0) {
+                this.checkQueueCompletion();
+                return;
+            }
+
+            state.isProcessingMissav = true;
+            const task = state.missavQueue.shift();
+            const debugInfo = this.createDebugInfo(task.code);
+
+            try {
+                const res = await MissAVService.fetchCover(task.code, debugInfo);
+                if (res.found) {
+                    const payload = {
+                        url: null,
+                        javdbSearchUrl: JavDBService.getSearchUrl(task.code),
+                        coverId: null,
+                        coverUrl: res.coverUrl,
+                        fallbackCoverUrl: res.fallbackCoverUrl || '',
+                        coverSource: 'missav',
+                        triedJav321: Boolean(debugInfo.jav321Tried),
+                        triedMissav: true,
+                        triedJavdb: Boolean(debugInfo.javdbTried),
+                        debugInfo
+                    };
+                    this.commitSuccess(task.code, debugInfo, payload);
+                } else {
+                    this.advanceTask(task, debugInfo);
+                }
+            } catch (e) {
+                console.error('[TorrentKitty] MissAV 队列处理错误:', e);
+                debugInfo.missavStatus = e.message || '请求出错';
+                this.advanceTask(task, debugInfo);
+            }
+
+            const delay = CONFIG.queue.missavDelay || 120;
+            setTimeout(() => {
+                state.isProcessingMissav = false;
+                this.processMissav();
+            }, delay);
+        },
+
+        async process() {
+            if (state.isProcessing) return;
+
+            if (!this.isSourceAvailable('javdb')) {
+                const label = JavDBService.isCircuitBroken() ? 'JavDB 熔断中' : '请先登录 JavDB';
+                this.drainJavdbQueue(label);
+                this.checkQueueCompletion();
+                return;
+            }
+
+            if (state.requestQueue.length === 0) {
+                this.checkQueueCompletion();
                 return;
             }
 
@@ -1503,46 +1886,66 @@
 
             state.isProcessing = true;
             const task = state.requestQueue.shift();
+            const debugInfo = this.createDebugInfo(task.code);
 
             try {
                 this.recordRequest();
-                await JavDBService.fetchInfo(task.code, task.retries);
+                const res = await JavDBService.fetchInfo(task.code, task.retries, debugInfo);
                 this.resetError();
+
+                if (res && res.found && res.payload) {
+                    this.commitSuccess(task.code, debugInfo, res.payload);
+                } else {
+                    const hasMoreSteps = task.nextIndex < task.pipeline.length;
+                    this.advanceTask(task, debugInfo);
+                    if (!hasMoreSteps && state.javdbSuccessCount === 0 && state.javdbConsecutiveMisses >= 3 && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
+                        GridContainer.showJavdbNotice({
+                            level: 'warning',
+                            message: '已连续多次未能从 JavDB 拉取到封面，可能尚未登录或需要通过验证。建议优先使用 JAV321 / MissAV 高清分摊策略。',
+                            showRetry: true
+                        });
+                    }
+                }
             } catch (e) {
-                console.error('[TorrentKitty] 队列处理错误:', e);
+                console.error('[TorrentKitty] JavDB 队列处理错误:', e);
+
+                if (e.message === 'ACCOUNT_SUSPENDED' || e.message === 'CIRCUIT_OPEN') {
+                    state.isProcessing = false;
+                    this.showSuspendedNotice(JavDBService.getBlockedUntilLabel());
+                    this.advanceTask(task, debugInfo);
+                    this.drainJavdbQueue('JavDB 账号停用');
+                    if (typeof App !== 'undefined' && App.showStatusBanner) {
+                        App.showStatusBanner('JavDB 已进入冷却保护，自动由 JAV321 / MissAV 接管封面获取。', true);
+                    }
+                    return;
+                }
 
                 if (e.message === 'LOGIN_REQUIRED') {
                     state.isPausedForLogin = true;
                     state.isProcessing = false;
-                    state.failedCodesForRetry.add(task.code);
-                    if (!state.requestQueue.some(item => item.code === task.code)) {
-                        state.requestQueue.unshift({ code: task.code, retries: 0 });
-                    }
-                    const debugInfo = state.debugInfoMap.get(task.code) || JavDBService.createDebugInfo(task.code);
                     if (!debugInfo.errorMessage) {
-                        debugInfo.errorMessage = '需要登录 JavDB 才能拉取封面';
+                        debugInfo.errorMessage = '需要登录 JavDB';
                     }
-                    UIUpdater.updateCode(task.code, debugInfo, {
-                        url: null,
-                        coverId: null,
-                        fallbackLabel: '[请先登录 JavDB]'
-                    });
+                    state.failedCodesForRetry.add(task.code);
+                    this.advanceTask(task, debugInfo);
+                    this.drainJavdbQueue('需要登录 JavDB');
+
                     if (typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
                         GridContainer.showJavdbNotice({
                             level: 'warning',
-                            message: '检测到 JavDB 需要登录，未登录将无法拉取封面（已暂停队列）。请先在浏览器登录 JavDB，完成后点击右侧重试。',
-                            showRetry: true
+                            message: '检测到 JavDB 需要登录（已暂停 JavDB 队列，改由 JAV321/MissAV 接管可用封面）。登录后可点击重试。',
+                            showRetry: true,
+                            showUseMissavOnly: this.getMode() !== 'no_javdb'
                         });
                     }
                     if (typeof App !== 'undefined' && App.showStatusBanner) {
-                        App.showStatusBanner('检测到 JavDB 需要登录，已暂停封面拉取，请登录 JavDB 后点击顶部重试按钮。', true);
+                        App.showStatusBanner('JavDB 需要登录，已自动改由 JAV321/MissAV 接管封面获取。', true);
                     }
                     return;
                 }
 
                 this.handleError();
 
-                // 限流或验证码允许退避重试；IP 封禁或超过重试次数则直接落入失败态展示
                 const canRetry = ['RATE_LIMITED', 'CAPTCHA_DETECTED'].includes(e.message)
                     && task.retries < CONFIG.queue.maxTaskRetries;
 
@@ -1550,21 +1953,31 @@
                     task.retries++;
                     state.requestQueue.push(task);
                 } else {
-                    state.failedCodesForRetry.add(task.code);
-                    const debugInfo = state.debugInfoMap.get(task.code) || JavDBService.createDebugInfo(task.code);
                     if (!debugInfo.errorMessage) {
                         debugInfo.errorMessage = e.message || String(e);
                     }
-                    UIUpdater.updateCode(task.code, debugInfo, {
-                        url: null,
-                        coverId: null,
-                        fallbackLabel: `[${debugInfo.errorMessage}]`
-                    });
+
+                    if (e.message === 'IP_BANNED') {
+                        JavDBService.activateCircuitBreaker(
+                            Date.now() + 15 * 60 * 1000,
+                            'JavDB 返回 403 访问拦截，已暂停 15 分钟请求'
+                        );
+                    }
+
+                    state.failedCodesForRetry.add(task.code);
+                    this.advanceTask(task, debugInfo);
+
+                    if (e.message === 'IP_BANNED') {
+                        this.drainJavdbQueue('JavDB 403 拦截');
+                    }
+
                     if (['IP_BANNED', 'CAPTCHA_DETECTED'].includes(e.message) && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
                         GridContainer.showJavdbNotice({
                             level: 'warning',
-                            message: 'JavDB 触发访问限制或验证（403/验证码），未登录更容易被拦截。建议前往 JavDB 登录并完成验证后点击重试。',
-                            showRetry: true
+                            message: 'JavDB 触发访问限制或验证（403/验证码），已自动尝试其他高清封面源兜底。',
+                            showRetry: true,
+                            showResetCircuit: JavDBService.isCircuitBroken(),
+                            showUseMissavOnly: this.getMode() !== 'no_javdb'
                         });
                     }
                 }
@@ -1578,11 +1991,377 @@
         }
     };
 
+    // ==================== JAV321 / DMM 原图服务 ====================
+    const JAV321Service = {
+        SEARCH_URL: 'https://www.jav321.com/search',
+
+        normalizeHttpsUrl(url) {
+            if (!url) return '';
+            let out = String(url).trim().replace(/^http:\/\//i, 'https://');
+            out = out.replace(/^(https:\/\/[^/]+)\/{2,}/i, '$1/');
+            return out;
+        },
+
+        buildDmmFallback(url) {
+            if (!url || !/^https:\/\/pics\.dmm\.co\.jp\//i.test(url)) return '';
+            return url.replace(/^https:\/\/pics\.dmm\.co\.jp\//i, 'https://www.jav321.com/');
+        },
+
+        postSearch(code) {
+            return new Promise((resolve, reject) => {
+                if (typeof GM_xmlhttpRequest !== 'function') {
+                    reject(new Error('缺少 GM_xmlhttpRequest 权限'));
+                    return;
+                }
+                GM_xmlhttpRequest({
+                    method: 'POST',
+                    url: this.SEARCH_URL,
+                    data: `sn=${encodeURIComponent(code)}`,
+                    timeout: 10000,
+                    headers: {
+                        'Content-Type': 'application/x-www-form-urlencoded',
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+                    },
+                    onload: (res) => resolve(res),
+                    onerror: () => reject(new Error('JAV321 网络请求失败')),
+                    ontimeout: () => reject(new Error('JAV321 请求超时'))
+                });
+            });
+        },
+
+        isCodeMatched(expectedCode, pinbanText, finalUrl) {
+            const pureExpected = String(expectedCode || '').toUpperCase().replace(/[^A-Z0-9]/ig, '');
+            if (!pureExpected) return false;
+
+            if (pinbanText) {
+                const pureResult = pinbanText.toUpperCase().replace(/[^A-Z0-9]/ig, '');
+                if (pureResult === pureExpected) return true;
+                // 兼容 300MIUM-1000 在页面标为 mium-1000 的情况
+                if (pureResult.length >= 4 && pureExpected.replace(/^\d+/, '') === pureResult) return true;
+                return false;
+            }
+
+            // 若未找到 <b>品番</b>，比对 URL path 末尾，如 /video/sone00300 对 SONE-300
+            if (finalUrl) {
+                const slug = finalUrl.split('/').pop().toUpperCase().replace(/[^A-Z0-9]/ig, '');
+                if (slug === pureExpected) return true;
+                const mExp = pureExpected.match(/^([A-Z]+)(\d+)$/);
+                const mSlug = slug.match(/^([A-Z]+)(\d+)$/);
+                if (mExp && mSlug && mExp[1] === mSlug[1] && parseInt(mExp[2], 10) === parseInt(mSlug[2], 10)) {
+                    return true;
+                }
+            }
+            return false;
+        },
+
+        parseDetail(html, finalUrl, expectedCode) {
+            if (!html) return null;
+            if (!/\/video\//i.test(finalUrl || '') && !html.includes('<b>品番</b>')) {
+                return null;
+            }
+
+            const pinbanMatch = html.match(/<b>\s*品番\s*<\/b>\s*:\s*([^<\r\n]+)/i);
+            const pinban = pinbanMatch ? pinbanMatch[1].trim() : '';
+            if (!this.isCodeMatched(expectedCode, pinban, finalUrl)) {
+                return null;
+            }
+
+            // 1) 优先提取 DMM 800x538 高清无水印原图 *pl.jpg
+            const dmmPlMatch = html.match(/https?:\/\/pics\.dmm\.co\.jp[^"'\s>]+pl\.jpg/i);
+            if (dmmPlMatch) {
+                const coverUrl = this.normalizeHttpsUrl(dmmPlMatch[0]);
+                return {
+                    coverUrl,
+                    fallbackCoverUrl: this.buildDmmFallback(coverUrl),
+                    jav321Url: finalUrl || ''
+                };
+            }
+
+            // 2) 若只有 jav321 自家镜像 pl.jpg
+            const jav321PlMatch = html.match(/https?:\/\/www\.jav321\.com[^"'\s>]+pl\.jpg/i);
+            if (jav321PlMatch) {
+                return {
+                    coverUrl: this.normalizeHttpsUrl(jav321PlMatch[0]),
+                    fallbackCoverUrl: '',
+                    jav321Url: finalUrl || ''
+                };
+            }
+
+            // 3) 若只有 DMM 首图 *ps.jpg，推导出 *pl.jpg 高清版本（附带 jav321 镜像兜底）
+            const dmmPsMatch = html.match(/https?:\/\/pics\.dmm\.co\.jp[^"'\s>]+ps\.jpg/i);
+            if (dmmPsMatch) {
+                const plUrl = this.normalizeHttpsUrl(dmmPsMatch[0].replace(/ps\.jpg$/i, 'pl.jpg'));
+                return {
+                    coverUrl: plUrl,
+                    fallbackCoverUrl: this.buildDmmFallback(plUrl),
+                    jav321Url: finalUrl || ''
+                };
+            }
+
+            // 4) MGS/素人片高清横版大图 pb_e_...jpg
+            const pbMatch = html.match(/https:\/\/www\.jav321\.com\/images\/[^"'\s>]*pb_e_[^"'\s>]+\.jpg/i);
+            if (pbMatch) {
+                return {
+                    coverUrl: this.normalizeHttpsUrl(pbMatch[0]),
+                    fallbackCoverUrl: '',
+                    jav321Url: finalUrl || ''
+                };
+            }
+
+            // 5) 素人首图 pf_o1_... 可尝试衍生 pb_e_，失败退回原 HTTPS 首图
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(html, 'text/html');
+            const mainImg = doc.querySelector('.panel-body .col-md-3 img');
+            const mainSrc = mainImg ? mainImg.getAttribute('src') : '';
+            if (mainSrc && /^https:\/\//i.test(mainSrc)) {
+                if (/\/pf_o1_/i.test(mainSrc)) {
+                    return {
+                        coverUrl: mainSrc.replace(/\/pf_o1_/i, '/pb_e_'),
+                        fallbackCoverUrl: mainSrc,
+                        jav321Url: finalUrl || ''
+                    };
+                }
+                return {
+                    coverUrl: mainSrc,
+                    fallbackCoverUrl: '',
+                    jav321Url: finalUrl || ''
+                };
+            }
+
+            // 注：image.jav321.com 仅支持 HTTP，在 HTTPS 页面会被 Mixed Content 拦截，跳过交由 MissAV/JavDB 处理
+            return null;
+        },
+
+        async fetchCover(code, debugInfo) {
+            debugInfo.jav321Tried = true;
+            try {
+                const res = await this.postSearch(code);
+                if (res.status !== 200) {
+                    debugInfo.jav321Status = `HTTP ${res.status}`;
+                    return { found: false, reason: 'HTTP_ERROR' };
+                }
+
+                const html = res.responseText || '';
+                if (html.includes('cf-challenge') || /Just a moment/i.test(html)) {
+                    debugInfo.jav321Status = 'CF 验证拦截';
+                    return { found: false, reason: 'CF_BLOCKED' };
+                }
+
+                const parsed = this.parseDetail(html, res.finalUrl, code);
+                if (parsed && parsed.coverUrl) {
+                    debugInfo.foundResult = true;
+                    debugInfo.coverSource = 'jav321';
+                    debugInfo.coverUrl = parsed.coverUrl;
+                    debugInfo.fallbackCoverUrl = parsed.fallbackCoverUrl || '';
+                    debugInfo.jav321Url = parsed.jav321Url;
+                    debugInfo.jav321Status = 'HTTP 200 (800px 原图)';
+                    return { found: true, ...parsed };
+                }
+
+                debugInfo.jav321Status = '未收录或无 HTTPS 高清图';
+                return { found: false, reason: 'NOT_FOUND' };
+            } catch (err) {
+                debugInfo.jav321Status = err.message || '请求失败';
+                return { found: false, reason: 'NETWORK_ERROR', error: err };
+            }
+        }
+    };
+
+    // ==================== MissAV 高清封面服务（fourhoi 静态 CDN） ====================
+    const MissAVService = {
+        getPageUrl(code) {
+            return `https://missav.ws/cn/${encodeURIComponent(code || '')}`;
+        },
+
+        buildSlugCandidates(code) {
+            if (!code) return [];
+            const clean = String(code).trim().toLowerCase().replace(/[\s_]+/g, '-');
+            const dashed = clean.replace(/^([a-z]{2,6})(\d{3,5})$/i, '$1-$2');
+            const list = [];
+            if (dashed !== clean) list.push(dashed);
+            list.push(clean);
+            return [...new Set(list)];
+        },
+
+        getCoverUrl(slug, variant = 'cover-n.jpg') {
+            return `https://fourhoi.com/${encodeURIComponent(slug)}/${variant}`;
+        },
+
+        headRequest(url) {
+            return new Promise((resolve, reject) => {
+                if (typeof GM_xmlhttpRequest !== 'function') {
+                    reject(new Error('缺少 GM_xmlhttpRequest 权限'));
+                    return;
+                }
+                GM_xmlhttpRequest({
+                    method: 'HEAD',
+                    url,
+                    timeout: 8000,
+                    headers: {
+                        'Accept': 'image/avif,image/webp,image/apng,image/jpeg,image/*,*/*;q=0.8'
+                    },
+                    onload: (res) => resolve(res),
+                    onerror: () => reject(new Error('MissAV CDN 网络请求失败')),
+                    ontimeout: () => reject(new Error('MissAV CDN 请求超时'))
+                });
+            });
+        },
+
+        probeImageElement(url) {
+            return new Promise((resolve) => {
+                const img = new Image();
+                let settled = false;
+                const finish = (ok, status) => {
+                    if (settled) return;
+                    settled = true;
+                    clearTimeout(timer);
+                    img.onload = null;
+                    img.onerror = null;
+                    resolve({ ok, status });
+                };
+                const timer = setTimeout(() => finish(false, 'TIMEOUT'), 8000);
+                img.referrerPolicy = 'no-referrer';
+                img.onload = () => finish(true, 200);
+                img.onerror = () => finish(false, 'IMG_ERROR');
+                img.src = url;
+            });
+        },
+
+        async fetchCover(code, debugInfo) {
+            const candidates = this.buildSlugCandidates(code);
+            debugInfo.missavTried = true;
+            debugInfo.missavUrl = this.getPageUrl(code);
+
+            for (const slug of candidates) {
+                // 优先取 cover-n.jpg（800x538 高清大图），若 404 再降级 cover-t.jpg
+                for (const variant of ['cover-n.jpg', 'cover-t.jpg']) {
+                    const coverUrl = this.getCoverUrl(slug, variant);
+                    try {
+                        const res = await this.headRequest(coverUrl);
+                        const headersText = res.responseHeaders || '';
+                        const ctMatch = headersText.match(/content-type\s*:\s*([^\r\n;]+)/i);
+                        const contentType = ctMatch ? ctMatch[1].trim().toLowerCase() : '';
+
+                        if (res.status === 200 && (!contentType || contentType.startsWith('image/'))) {
+                            debugInfo.foundResult = true;
+                            debugInfo.coverSource = 'missav';
+                            debugInfo.coverUrl = coverUrl;
+                            debugInfo.fallbackCoverUrl = variant === 'cover-n.jpg' ? this.getCoverUrl(slug, 'cover-t.jpg') : '';
+                            debugInfo.missavStatus = `HTTP 200 (${slug}/${variant})`;
+                            return { found: true, coverUrl, fallbackCoverUrl: debugInfo.fallbackCoverUrl };
+                        }
+
+                        if (res.status === 405) {
+                            const imgProbe = await this.probeImageElement(coverUrl);
+                            if (imgProbe.ok) {
+                                debugInfo.foundResult = true;
+                                debugInfo.coverSource = 'missav';
+                                debugInfo.coverUrl = coverUrl;
+                                debugInfo.missavStatus = `IMG 200 (${slug}/${variant})`;
+                                return { found: true, coverUrl, fallbackCoverUrl: '' };
+                            }
+                        }
+
+                        if (res.status === 404) {
+                            debugInfo.missavStatus = `HTTP 404 (${slug} 未收录)`;
+                            continue;
+                        }
+
+                        debugInfo.missavStatus = `HTTP ${res.status || 'ERR'} (${slug})`;
+                        return { found: false, reason: 'NETWORK_ERROR' };
+                    } catch (err) {
+                        debugInfo.missavStatus = err.message || '请求失败';
+                        return { found: false, reason: 'NETWORK_ERROR', error: err };
+                    }
+                }
+            }
+
+            return { found: false, reason: 'NOT_FOUND' };
+        }
+    };
+
     // ==================== JavDB 服务 ====================
     const JavDBService = {
+        CIRCUIT_UNTIL_KEY: 'tk_javdb_blocked_until',
+        CIRCUIT_MSG_KEY: 'tk_javdb_blocked_msg',
+
+        getSearchUrl(code) {
+            return `https://javdb.com/search?q=${encodeURIComponent(code || '')}&f=all`;
+        },
+
         getCoverUrl(coverId) {
             const prefix = coverId.substring(0, 2).toLowerCase();
             return `https://c0.jdbstatic.com/covers/${prefix}/${coverId}.jpg`;
+        },
+
+        loadCircuitState() {
+            if (typeof GM_getValue !== 'function') return;
+            const until = Number(GM_getValue(this.CIRCUIT_UNTIL_KEY, 0)) || 0;
+            const msg = GM_getValue(this.CIRCUIT_MSG_KEY, '') || '';
+            if (until > Date.now()) {
+                state.javdbBlockedUntil = until;
+                state.javdbBlockedMessage = msg;
+            } else if (until > 0) {
+                this.clearCircuitBreaker();
+            }
+        },
+
+        isCircuitBroken() {
+            if (!state.javdbBlockedUntil) return false;
+            if (state.javdbBlockedUntil <= Date.now()) {
+                this.clearCircuitBreaker();
+                return false;
+            }
+            return true;
+        },
+
+        getBlockedUntilLabel() {
+            if (state.javdbBlockedMessage) return state.javdbBlockedMessage;
+            if (!state.javdbBlockedUntil) return '';
+            const d = new Date(state.javdbBlockedUntil);
+            const pad = (n) => String(n).padStart(2, '0');
+            return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+        },
+
+        activateCircuitBreaker(blockedUntil, message = '') {
+            const until = (blockedUntil && blockedUntil > Date.now())
+                ? blockedUntil
+                : (Date.now() + 2 * 60 * 60 * 1000);
+            state.javdbBlockedUntil = until;
+            state.javdbBlockedMessage = message || '';
+            if (typeof GM_setValue === 'function') {
+                GM_setValue(this.CIRCUIT_UNTIL_KEY, until);
+                GM_setValue(this.CIRCUIT_MSG_KEY, state.javdbBlockedMessage);
+            }
+        },
+
+        clearCircuitBreaker() {
+            state.javdbBlockedUntil = 0;
+            state.javdbBlockedMessage = '';
+            if (typeof GM_deleteValue === 'function') {
+                GM_deleteValue(this.CIRCUIT_UNTIL_KEY);
+                GM_deleteValue(this.CIRCUIT_MSG_KEY);
+            }
+        },
+
+        detectSuspension(html) {
+            if (!html) return null;
+            const isSuspended = /帳號已被臨時停用|账号已被临时停用|異常採集行為|异常采集行为|瀏覽速度遠超正常用戶|浏览速度远超正常用户|暫時停用帳號|暂时停用账号/i.test(html);
+            if (!isSuspended) return null;
+
+            const resumeMatch = html.match(/(?:將於|将于)\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2})(?:[（(][^）)]+[）)])?\s*(?:自動恢復|自动恢复)/i);
+            const resumeText = resumeMatch ? resumeMatch[1].trim() : '';
+            let blockedUntil = Date.now() + 6 * 60 * 60 * 1000;
+            if (resumeText) {
+                const dtMatch = resumeText.match(/(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2})/);
+                if (dtMatch) {
+                    const parsed = Date.parse(`${dtMatch[1]}T${dtMatch[2]}:00+08:00`);
+                    if (!Number.isNaN(parsed) && parsed > Date.now()) {
+                        blockedUntil = parsed;
+                    }
+                }
+            }
+            return { resumeText, blockedUntil };
         },
 
         isLoginRequired(response, html) {
@@ -1592,7 +2371,6 @@
                 return true;
             }
             if (!html) return false;
-            // 若已包含影片列表，说明搜索页正常返回
             if (html.includes('movie-list')) return false;
             return (
                 /action=["'][^"']*\/users\/sign_in["']/i.test(html) ||
@@ -1601,27 +2379,21 @@
             );
         },
 
-        async fetchInfo(code, retryAttempt = 0) {
-            const debugInfo = this.createDebugInfo(code);
+        async fetchInfo(code, retryAttempt = 0, existingDebugInfo = null) {
+            const debugInfo = existingDebugInfo || QueueManager.createDebugInfo(code);
+            debugInfo.javdbTried = true;
             if (retryAttempt > 0) {
                 debugInfo.retryAttempt = retryAttempt;
             }
 
-            const cached = CacheManager.get(code);
-            if (cached) {
-                if (cached.coverId) {
-                    state.javdbSuccessCount++;
-                    if (state.javdbNoticeLevel === 'info' && typeof GridContainer !== 'undefined' && GridContainer.hideJavdbNotice) {
-                        GridContainer.hideJavdbNotice();
-                    }
-                }
-                state.debugInfoMap.set(code, cached.debugInfo || debugInfo);
-                UIUpdater.updateCode(code, cached.debugInfo || debugInfo, cached);
-                return;
+            if (this.isCircuitBroken()) {
+                debugInfo.errorMessage = 'JavDB 处于风控熔断冷却期';
+                debugInfo.fetchStatus = '已跳过 (熔断保护)';
+                throw new Error('CIRCUIT_OPEN');
             }
 
             try {
-                const searchUrl = `https://javdb.com/search?q=${encodeURIComponent(code)}&f=all`;
+                const searchUrl = this.getSearchUrl(code);
                 debugInfo.fetchUrl = searchUrl;
 
                 const response = await gmFetch(searchUrl);
@@ -1633,12 +2405,12 @@
                 }
 
                 if (response.status === 429) {
-                    debugInfo.errorMessage = '请求过于频繁 (429)';
+                    debugInfo.errorMessage = 'JavDB 请求过于频繁 (429)';
                     throw new Error('RATE_LIMITED');
                 }
 
                 if (response.status === 403) {
-                    debugInfo.errorMessage = 'IP 被封禁 (403)';
+                    debugInfo.errorMessage = 'JavDB 访问被限制 (403)';
                     throw new Error('IP_BANNED');
                 }
 
@@ -1648,13 +2420,22 @@
 
                 const html = await response.text();
 
+                const suspension = this.detectSuspension(html);
+                if (suspension) {
+                    const label = suspension.resumeText || this.getBlockedUntilLabel();
+                    this.activateCircuitBreaker(suspension.blockedUntil, suspension.resumeText);
+                    debugInfo.fetchStatus = 'HTTP 200 (账号临时停用)';
+                    debugInfo.errorMessage = `JavDB 账号临时停用${label ? ` (${label}恢复)` : ''}`;
+                    throw new Error('ACCOUNT_SUSPENDED');
+                }
+
                 if (this.isLoginRequired(response, html)) {
                     debugInfo.errorMessage = '需要登录 JavDB 才能拉取封面';
                     throw new Error('LOGIN_REQUIRED');
                 }
 
                 if (html.includes('cf-challenge') || html.includes('captcha')) {
-                    debugInfo.errorMessage = '检测到 Cloudflare 挑战/验证码';
+                    debugInfo.errorMessage = '检测到 JavDB Cloudflare 挑战/验证码';
                     throw new Error('CAPTCHA_DETECTED');
                 }
 
@@ -1667,82 +2448,49 @@
                         GridContainer.hideJavdbNotice();
                     }
 
+                    const coverUrl = this.getCoverUrl(result.coverId);
                     debugInfo.foundResult = true;
+                    debugInfo.coverSource = 'javdb';
                     debugInfo.javdbUrl = result.url;
                     debugInfo.coverId = result.coverId;
-                    debugInfo.coverUrl = this.getCoverUrl(result.coverId);
+                    debugInfo.coverUrl = coverUrl;
+                    debugInfo.errorMessage = '';
 
-                    const payload = { ...result, debugInfo };
-                    state.debugInfoMap.set(code, debugInfo);
-                    CacheManager.set(code, payload);
-                    UIUpdater.updateCode(code, debugInfo, payload);
-                } else {
-                    state.javdbConsecutiveMisses++;
-                    state.failedCodesForRetry.add(code);
-                    debugInfo.errorMessage = '未找到匹配的番号数据';
-                    const payload = { url: null, coverId: null, debugInfo };
-                    state.debugInfoMap.set(code, debugInfo);
-                    CacheManager.set(code, payload);
-                    UIUpdater.updateCode(code, debugInfo, payload);
-
-                    if (state.javdbSuccessCount === 0 && state.javdbConsecutiveMisses >= 3 && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
-                        GridContainer.showJavdbNotice({
-                            level: 'warning',
-                            message: '已连续多次未能从 JavDB 拉取到封面，可能尚未登录 JavDB 或需要通过人机验证。请前往 JavDB 登录后点击重试。',
-                            showRetry: true
-                        });
-                    }
+                    const payload = {
+                        ...result,
+                        javdbSearchUrl: searchUrl,
+                        coverUrl,
+                        fallbackCoverUrl: '',
+                        coverSource: 'javdb',
+                        triedJav321: Boolean(debugInfo.jav321Tried),
+                        triedMissav: Boolean(debugInfo.missavTried),
+                        triedJavdb: true,
+                        debugInfo
+                    };
+                    return { found: true, payload };
                 }
+
+                state.javdbConsecutiveMisses++;
+                debugInfo.fetchStatus = `${debugInfo.fetchStatus} (无匹配)`;
+                return { found: false, reason: 'NOT_FOUND' };
             } catch (error) {
                 debugInfo.errorMessage = debugInfo.errorMessage || error.message || String(error);
                 state.debugInfoMap.set(code, debugInfo);
                 console.error('[TorrentKitty] JavDB 请求出错:', error);
 
-                const isSpecialControl = ['LOGIN_REQUIRED', 'RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
+                const isSpecialControl = ['ACCOUNT_SUSPENDED', 'CIRCUIT_OPEN', 'LOGIN_REQUIRED', 'RATE_LIMITED', 'IP_BANNED', 'CAPTCHA_DETECTED'].includes(error.message);
                 if (isSpecialControl) {
-                    // 实时更新抽屉日志（即使尚未最终放弃，也可在抽屉看到当前状态）
                     UIUpdater.refreshDrawerLogs(code, debugInfo);
                     throw error;
                 }
 
                 state.javdbConsecutiveMisses++;
-                state.failedCodesForRetry.add(code);
-
-                const payload = {
-                    url: null,
-                    coverId: null,
-                    debugInfo,
-                    isError: true,
-                    errorExpiry: Date.now() + CONFIG.errorCacheExpiry
-                };
-                CacheManager.set(code, payload);
-                UIUpdater.updateCode(code, debugInfo, {
-                    ...payload,
-                    fallbackLabel: `[拉取失败: ${debugInfo.errorMessage}]`
-                });
-
-                if (state.javdbSuccessCount === 0 && state.javdbConsecutiveMisses >= 3 && typeof GridContainer !== 'undefined' && GridContainer.showJavdbNotice) {
-                    GridContainer.showJavdbNotice({
-                        level: 'warning',
-                        message: '封面拉取连续失败，请确认已在浏览器登录 JavDB（且可正常访问），完成后点击重试。',
-                        showRetry: true
-                    });
-                }
+                return { found: false, reason: 'NETWORK_ERROR', error };
             }
         },
 
         createDebugInfo(code) {
-            return {
-                code,
-                timestamp: new Date().toISOString(),
-                fetchUrl: '',
-                fetchStatus: '',
-                foundResult: false,
-                javdbUrl: '',
-                coverId: '',
-                coverUrl: '',
-                errorMessage: ''
-            };
+            return QueueManager.createDebugInfo(code);
         },
 
         parseSearchResult(html, expectedCode) {
@@ -1926,21 +2674,43 @@
             document.getElementById('tk-btn-config').onclick = () => ModalManager.showSettings();
             this.syncConfigDimensions();
 
-            // 首次/未关闭提示时展示轻量引导（成功加载任意封面后自动隐藏）
-            const loginTipDismissed = typeof GM_getValue === 'function'
-                ? GM_getValue('tk_javdb_login_tip_dismissed', false)
-                : false;
-            if (!loginTipDismissed && state.javdbSuccessCount === 0) {
+            // 熔断或纯 JavDB 优先模式下的顶部引导状态
+            if (typeof JavDBService !== 'undefined' && JavDBService.isCircuitBroken()) {
+                const untilLabel = JavDBService.getBlockedUntilLabel();
+                const mode = state.settings.coverSourceMode || CONFIG.defaults.coverSourceMode;
                 this.showJavdbNotice({
-                    level: 'info',
-                    message: '💡 提示：封面数据来自 JavDB，若无法加载封面，请先在浏览器登录 JavDB 账号。',
+                    level: 'warning',
+                    message: `JavDB 账号处于风控冷却保护中${untilLabel ? `（预计 ${untilLabel} 恢复）` : ''}，已自动由 JAV321 / MissAV 高清源接管封面加载。`,
+                    showLoginLink: true,
                     showRetry: false,
-                    showDismissForever: true
+                    showResetCircuit: true,
+                    showUseMissavOnly: mode !== 'no_javdb' && mode !== 'missav_only'
                 });
+            } else {
+                const loginTipDismissed = typeof GM_getValue === 'function'
+                    ? GM_getValue('tk_javdb_login_tip_dismissed', false)
+                    : false;
+                const mode = state.settings.coverSourceMode || CONFIG.defaults.coverSourceMode;
+                if (!loginTipDismissed && mode === 'javdb_first' && state.javdbSuccessCount === 0) {
+                    this.showJavdbNotice({
+                        level: 'info',
+                        message: '💡 提示：当前为 JavDB 优先模式，若无法加载封面，请先登录 JavDB 或在配置中切换 JAV321/MissAV 分摊模式。',
+                        showRetry: false,
+                        showDismissForever: true
+                    });
+                }
             }
         },
 
-        showJavdbNotice({ level = 'warning', message, showRetry = true, showDismissForever = false } = {}) {
+        showJavdbNotice({
+            level = 'warning',
+            message,
+            showLoginLink = true,
+            showRetry = true,
+            showResetCircuit = false,
+            showUseMissavOnly = false,
+            showDismissForever = false
+        } = {}) {
             const notice = document.getElementById('tk-javdb-notice');
             if (!notice) return;
 
@@ -1956,21 +2726,47 @@
             const actionsEl = document.createElement('div');
             actionsEl.className = 'tk-javdb-notice-actions';
 
-            const loginLink = document.createElement('a');
-            loginLink.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--primary';
-            loginLink.href = 'https://javdb.com/login';
-            loginLink.target = '_blank';
-            loginLink.rel = 'noopener noreferrer';
-            loginLink.textContent = '🔐 前往 JavDB 登录';
-            actionsEl.appendChild(loginLink);
+            if (showLoginLink) {
+                const loginLink = document.createElement('a');
+                loginLink.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--primary';
+                loginLink.href = 'https://javdb.com/login';
+                loginLink.target = '_blank';
+                loginLink.rel = 'noopener noreferrer';
+                loginLink.textContent = '🔐 前往 JavDB';
+                actionsEl.appendChild(loginLink);
+            }
 
-            if (showRetry) {
+            if (showResetCircuit) {
+                const resetBtn = document.createElement('button');
+                resetBtn.type = 'button';
+                resetBtn.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--secondary';
+                resetBtn.textContent = '🔓 解除熔断并重试';
+                resetBtn.onclick = () => QueueManager.resetCircuitAndRetry();
+                actionsEl.appendChild(resetBtn);
+            } else if (showRetry) {
                 const retryBtn = document.createElement('button');
                 retryBtn.type = 'button';
                 retryBtn.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--secondary';
                 retryBtn.textContent = '↻ 我已登录，重试拉取';
                 retryBtn.onclick = () => QueueManager.resumeAfterLogin();
                 actionsEl.appendChild(retryBtn);
+            }
+
+            if (showUseMissavOnly) {
+                const missavBtn = document.createElement('button');
+                missavBtn.type = 'button';
+                missavBtn.className = 'tk-javdb-notice-btn tk-javdb-notice-btn--secondary';
+                missavBtn.textContent = '⚡ 切换零 JavDB';
+                missavBtn.onclick = () => {
+                    state.settings.coverSourceMode = 'no_javdb';
+                    SettingsManager.save();
+                    QueueManager.onSettingsChanged();
+                    this.hideJavdbNotice();
+                    if (typeof App !== 'undefined' && App.showStatusBanner) {
+                        App.showStatusBanner('已切换为零 JavDB 模式（仅使用 JAV321 与 MissAV 高清封面）。', true);
+                    }
+                };
+                actionsEl.appendChild(missavBtn);
             }
 
             const closeBtn = document.createElement('button');
@@ -2202,7 +2998,9 @@
         },
 
         applyToCard(card, debugInfo, payload) {
-            const { url, coverId, fallbackLabel } = payload;
+            const { url, javdbSearchUrl, coverId, fallbackLabel, fallbackCoverUrl } = payload;
+            const code = card.dataset.code || (debugInfo && debugInfo.code) || '';
+            const coverUrl = payload.coverUrl || (coverId ? JavDBService.getCoverUrl(coverId) : '');
             const img = card.querySelector('.tk-cover-img');
             const skeleton = card.querySelector('.tk-skeleton');
             const fallback = card.querySelector('.tk-cover-fallback');
@@ -2211,16 +3009,26 @@
             if (javdbBtn) {
                 if (url) {
                     javdbBtn.href = url;
+                    javdbBtn.textContent = '🔗 JavDB';
+                    javdbBtn.title = '打开 JavDB 详情页';
+                    javdbBtn.classList.remove('disabled');
+                } else if (javdbSearchUrl || code) {
+                    javdbBtn.href = javdbSearchUrl || JavDBService.getSearchUrl(code);
+                    javdbBtn.textContent = '🔍 JavDB';
+                    javdbBtn.title = '前往 JavDB 搜索该番号';
                     javdbBtn.classList.remove('disabled');
                 } else {
                     javdbBtn.href = '#';
+                    javdbBtn.textContent = '🔗 JavDB';
+                    javdbBtn.title = '';
                     javdbBtn.classList.add('disabled');
                 }
             }
 
             if (img && skeleton) {
-                if (coverId) {
-                    const coverUrl = JavDBService.getCoverUrl(coverId);
+                if (coverUrl) {
+                    let triedFallbackUrl = false;
+                    img.referrerPolicy = 'no-referrer';
                     img.classList.remove('loaded');
                     skeleton.style.display = '';
                     if (fallback) fallback.style.display = 'none';
@@ -2231,6 +3039,12 @@
                         if (fallback) fallback.style.display = 'none';
                     };
                     img.onerror = () => {
+                        if (!triedFallbackUrl && fallbackCoverUrl && fallbackCoverUrl !== img.src) {
+                            triedFallbackUrl = true;
+                            if (debugInfo) debugInfo.coverUrl = fallbackCoverUrl;
+                            img.src = fallbackCoverUrl;
+                            return;
+                        }
                         if (debugInfo) debugInfo.imageLoadSuccess = false;
                         img.onerror = null;
                         img.src = this.PLACEHOLDER_FAILED;
@@ -2296,15 +3110,34 @@
 
         formatDebugInfo(debugInfo) {
             const retryLine = debugInfo.retryAttempt ? `\n[+] 重试轮次: 第 ${debugInfo.retryAttempt} 次` : '';
-            return `>> SYSTEM DIAGNOSTICS: JAVDB MODULE
+            const sourceMap = {
+                jav321: 'JAV321 (DMM/MGS 800px 原图)',
+                missav: 'MissAV CDN (fourhoi 高清)',
+                javdb: 'JavDB'
+            };
+            const modeMap = {
+                jav321_first: 'JAV321 原图优先 (MissAV 高清 / JavDB 兜底)',
+                balanced: '高清双源交替分摊 (JAV321 / MissAV 各半)',
+                missav_first: 'MissAV 高清优先 (JAV321 / JavDB 兜底)',
+                javdb_first: 'JavDB 优先 (异常或未命中切 JAV321 / MissAV)',
+                no_javdb: '零 JavDB 模式 (仅 JAV321 + MissAV 高清)',
+                missav_only: '零 JavDB 模式 (仅 JAV321 + MissAV 高清)'
+            };
+            const sourceLabel = sourceMap[debugInfo.coverSource] || (debugInfo.foundResult ? '未知来源' : '未命中');
+            const modeLabel = modeMap[debugInfo.mode] || debugInfo.mode || '默认';
+            return `>> SYSTEM DIAGNOSTICS: COVER ENGINE
     ============================================================
     [+] 番号: ${debugInfo.code}
+    [+] 调度策略: ${modeLabel}
+    [+] 封面来源: ${sourceLabel}
     [+] 时间戳: ${debugInfo.timestamp}
-    [+] 请求地址: ${debugInfo.fetchUrl}
-    [+] HTTP 状态: ${debugInfo.fetchStatus}${retryLine}
+    [+] JAV321 状态: ${debugInfo.jav321Status || '未请求'}
+    [+] MissAV 状态: ${debugInfo.missavStatus || '未请求'}
+    [+] JavDB 请求: ${debugInfo.fetchUrl || '未请求'}
+    [+] JavDB 状态: ${debugInfo.fetchStatus || '未请求'}${retryLine}
     [+] 命中成功: ${debugInfo.foundResult ? '[ 是 ]' : '[ 否 ]'}
     [+] JavDB 地址: ${debugInfo.javdbUrl || '无'}
-    [+] 封面 ID: ${debugInfo.coverId || '无'}
+    [+] 封面地址: ${debugInfo.coverUrl || '无'}
     [+] 封面加载: ${debugInfo.imageLoadSuccess !== undefined ? (debugInfo.imageLoadSuccess ? '[ 成功 ]' : '[ 失败 ]') : '[ 排队中 ]'}
     [!] 错误捕获: ${debugInfo.errorMessage || '无异常'}
     ============================================================`;
@@ -2312,11 +3145,25 @@
 
         showSettings() {
             const panel = document.createElement('div');
-            panel.style.cssText = StyleUtils.modal({ maxWidth: '400px' });
+            panel.style.cssText = StyleUtils.modal({ maxWidth: '430px' });
+            const rawMode = state.settings.coverSourceMode || CONFIG.defaults.coverSourceMode;
+            const currentMode = rawMode === 'missav_only' ? 'no_javdb' : rawMode;
 
             panel.innerHTML = `
                 <h3 style="margin: 0 0 20px 0; color: #2A2118; font-weight: 700; font-family: var(--tk-font-display);">网格显示配置</h3>
                 <div style="background: rgba(255,255,255,0.4); border-radius: 8px; padding: 16px; margin-bottom: 20px; border: 1px solid rgba(61, 50, 38, 0.08);">
+                    <div style="margin-bottom: 20px;">
+                        <label style="display: flex; justify-content: space-between; font-size: 13px; color: var(--tk-text-muted); margin-bottom: 8px;">
+                            <span>封面来源与压力分摊</span>
+                        </label>
+                        <select id="cover-source-select" style="width: 100%; padding: 8px 10px; border-radius: 6px; border: 1px solid rgba(61, 50, 38, 0.2); background: rgba(255,255,255,0.85); color: #2A2118; font-size: 13px; outline: none;">
+                            <option value="jav321_first">JAV321/DMM 原图优先（推荐：800px 无水印，MissAV/JavDB 兜底）</option>
+                            <option value="balanced">双源高清交替分摊（JAV321 与 MissAV 高清各半，JavDB 兜底）</option>
+                            <option value="missav_first">MissAV 高清优先（800px cover-n，JAV321/JavDB 兜底）</option>
+                            <option value="javdb_first">JavDB 优先（限流/停用时自动切 JAV321 与 MissAV）</option>
+                            <option value="no_javdb">零 JavDB 模式（仅 JAV321 + MissAV 高清，防封/冷却期适用）</option>
+                        </select>
+                    </div>
                     <div style="margin-bottom: 20px;">
                         <label style="display: flex; justify-content: space-between; font-size: 13px; color: var(--tk-text-muted); margin-bottom: 8px;">
                             <span>页面版面最大宽度</span>
@@ -2344,6 +3191,8 @@
 
             const overlay = this.createOverlay(panel);
 
+            const coverSourceSelect = panel.querySelector('#cover-source-select');
+            coverSourceSelect.value = currentMode;
             const pageWidthSlider = panel.querySelector('#page-width-slider');
             const pageWidthValue = panel.querySelector('#page-width-value');
             const pagesSlider = panel.querySelector('#pages-slider');
@@ -2357,6 +3206,7 @@
             widthSlider.oninput = () => { widthValue.textContent = widthSlider.value; };
 
             const resetBtn = this.createButton('重置', () => {
+                coverSourceSelect.value = CONFIG.defaults.coverSourceMode;
                 pageWidthSlider.value = CONFIG.defaults.pageMaxWidth;
                 pageWidthValue.textContent = CONFIG.defaults.pageMaxWidth;
                 pagesSlider.value = CONFIG.defaults.maxPagesToFetch;
@@ -2366,11 +3216,17 @@
             });
 
             const saveBtn = this.createButton('保存', () => {
+                const prevMode = state.settings.coverSourceMode || CONFIG.defaults.coverSourceMode;
+                const nextMode = coverSourceSelect.value;
+                state.settings.coverSourceMode = nextMode;
                 state.settings.pageMaxWidth = parseInt(pageWidthSlider.value, 10);
                 state.settings.maxPagesToFetch = parseInt(pagesSlider.value, 10);
                 state.settings.coverWidth = parseInt(widthSlider.value, 10);
                 SettingsManager.save();
                 UIUpdater.updateAllCovers();
+                if (prevMode !== nextMode && typeof QueueManager.onSettingsChanged === 'function') {
+                    QueueManager.onSettingsChanged();
+                }
                 overlay.remove();
             });
 
@@ -2461,7 +3317,158 @@
     };
 
     // ==================== 主逻辑 ====================
+    const CF_VERIFY_WINDOW_NAME = 'tk_cf_verify';
+
     const App = {
+        _cfVerifyTimer: null,
+        _cfVerifyPopup: null,
+
+        _clearCfVerifyWatch() {
+            if (this._cfVerifyTimer) {
+                clearInterval(this._cfVerifyTimer);
+                this._cfVerifyTimer = null;
+            }
+        },
+
+        isCloudflareChallengeDoc(doc) {
+            if (!doc) return false;
+            const title = (doc.title || '').toLowerCase();
+            if (title.includes('just a moment') || title.includes('attention required')) {
+                return true;
+            }
+            return Boolean(
+                doc.querySelector('#challenge-form, #challenge-running, .cf-challenge, .cf-turnstile, [src*="challenge-platform"], [src*="/cdn-cgi/challenge-platform"]')
+            );
+        },
+
+        isCloudflareHtml(status, html) {
+            if (status === 403) return true;
+            if (!html) return status === 503;
+            const lower = html.toLowerCase();
+            if (lower.includes('archiveresult')) return false;
+            const hasCfMarker = lower.includes('cf-challenge')
+                || lower.includes('challenge-platform')
+                || lower.includes('cf-turnstile')
+                || lower.includes('<title>just a moment');
+            return status === 503 ? true : hasCfMarker;
+        },
+
+        resumeAfterCfVerify() {
+            this._clearCfVerifyWatch();
+            if (this._cfVerifyPopup && !this._cfVerifyPopup.closed) {
+                try {
+                    this._cfVerifyPopup.close();
+                } catch {
+                    // 忽略窗口关闭权限异常
+                }
+            }
+            this._cfVerifyPopup = null;
+            state.pageRetryCount = 0;
+            state.consecutiveEmptyPages = 0;
+            state.targetValidCount = this.getVisibleCardsCount() + 8;
+            this.showStatusBanner('正在重新拉取下一页数据...', false);
+            this.checkPaginationAndDispatch();
+        },
+
+        openCfVerifyPopup(targetUrl, pageNum) {
+            if (!targetUrl) return;
+            this._clearCfVerifyWatch();
+
+            if (this._cfVerifyPopup && !this._cfVerifyPopup.closed) {
+                this._cfVerifyPopup.focus();
+                return;
+            }
+
+            const width = 520;
+            const height = 640;
+            const left = Math.max(0, Math.round(window.screenX + (window.outerWidth - width) / 2));
+            const top = Math.max(0, Math.round(window.screenY + (window.outerHeight - height) / 2));
+            const features = `popup=yes,width=${width},height=${height},left=${left},top=${top},resizable=yes,scrollbars=yes`;
+
+            const popup = window.open(targetUrl, CF_VERIFY_WINDOW_NAME, features);
+            if (!popup) {
+                this.stopPagination(
+                    '浏览器拦截了弹窗，请点击右侧链接在新标签页完成 CF 验证后点重试。',
+                    { label: '↻ 已过验证，继续加载', secondary: true },
+                    [{ label: `打开第 ${pageNum} 页过盾 ↗`, href: targetUrl }]
+                );
+                return;
+            }
+
+            this._cfVerifyPopup = popup;
+            let cancelled = false;
+            const startedAt = Date.now();
+            const maxWaitMs = 5 * 60 * 1000;
+
+            this.showStatusBanner(
+                `请在弹出的小窗内完成 Cloudflare 验证，通过后将自动继续加载第 ${pageNum} 页...`,
+                false,
+                [
+                    {
+                        label: '↻ 我已过验证，继续加载',
+                        onClick: () => this.resumeAfterCfVerify()
+                    },
+                    {
+                        label: '取消',
+                        secondary: true,
+                        onClick: () => {
+                            cancelled = true;
+                            this._clearCfVerifyWatch();
+                            if (!popup.closed) {
+                                try { popup.close(); } catch {}
+                            }
+                            this._cfVerifyPopup = null;
+                            this.stopPagination(
+                                '已取消验证，需要时可重新弹出小窗过 CF 盾。',
+                                { label: '↻ 重试加载', secondary: true },
+                                [{ label: '🛡️ 弹出小窗过 CF 盾', onClick: () => this.openCfVerifyPopup(targetUrl, pageNum) }]
+                            );
+                        }
+                    }
+                ]
+            );
+
+            this._cfVerifyTimer = setInterval(() => {
+                if (cancelled) return;
+
+                if (Date.now() - startedAt > maxWaitMs) {
+                    this._clearCfVerifyWatch();
+                    this.stopPagination(
+                        '等待验证超时，完成验证后请手动点击继续加载。',
+                        { label: '↻ 继续加载', secondary: true },
+                        [{ label: '🛡️ 重新打开验证小窗', onClick: () => this.openCfVerifyPopup(targetUrl, pageNum) }]
+                    );
+                    return;
+                }
+
+                if (popup.closed) {
+                    this._clearCfVerifyWatch();
+                    this._cfVerifyPopup = null;
+                    setTimeout(() => this.resumeAfterCfVerify(), 200);
+                    return;
+                }
+
+                // 留出初始跳转窗口期，避免误读 about:blank 或中间页
+                if (Date.now() - startedAt < 1000) return;
+
+                try {
+                    if (popup.location.origin !== window.location.origin) return;
+                    if (popup.location.href === 'about:blank') return;
+                    const doc = popup.document;
+                    if (!doc || doc.readyState !== 'complete') return;
+                    if (this.isCloudflareChallengeDoc(doc)) return;
+
+                    const hasTable = Boolean(this._findResultTable(doc));
+                    if (hasTable || doc.querySelector('#main .wrapper')) {
+                        this._clearCfVerifyWatch();
+                        console.log(`[TorrentKitty] 检测到验证小窗已通过 CF 并进入目标页，自动续拉第 ${pageNum} 页`);
+                        setTimeout(() => this.resumeAfterCfVerify(), 250);
+                    }
+                } catch {
+                    // 验证跳转期间若短暂处于外部域，忽略跨域读取异常等待回到同源
+                }
+            }, 600);
+        },
         createVirtualRow(data) {
             const tr = document.createElement('tr');
             tr.dataset.validCode = data.code;
@@ -2726,7 +3733,7 @@
             }
         },
 
-        showStatusBanner(text, showContinueBtn = false, actionLink = null) {
+        showStatusBanner(text, continueOption = false, extraActions = null) {
             let banner = document.getElementById('tk-status-banner');
             if (!banner) {
                 banner = document.createElement('div');
@@ -2759,11 +3766,38 @@
             textSpan.textContent = text;
             banner.appendChild(textSpan);
 
-            if (showContinueBtn) {
+            const actionsList = Array.isArray(extraActions)
+                ? extraActions
+                : (extraActions && extraActions.href ? [extraActions] : []);
+
+            actionsList.forEach(action => {
+                if (!action) return;
+                const el = action.href ? document.createElement('a') : document.createElement('button');
+                el.textContent = action.label || '操作';
+                el.className = action.secondary ? 'tk-toolbar-btn tk-toolbar-btn--secondary' : 'tk-toolbar-btn';
+                if (action.href) {
+                    el.href = action.href;
+                    el.target = action.target || '_blank';
+                    el.rel = 'noopener noreferrer';
+                    el.style.textDecoration = 'none';
+                    el.style.display = 'inline-block';
+                } else {
+                    el.type = 'button';
+                }
+                if (typeof action.onClick === 'function') {
+                    el.onclick = action.onClick;
+                }
+                banner.appendChild(el);
+            });
+
+            if (continueOption) {
+                const isObj = typeof continueOption === 'object';
                 const btn = document.createElement('button');
-                btn.textContent = '加载更多';
-                btn.className = 'tk-toolbar-btn';
-                btn.style.marginLeft = '8px';
+                btn.type = 'button';
+                btn.textContent = (isObj && continueOption.label) || '加载更多';
+                btn.className = (isObj && continueOption.secondary)
+                    ? 'tk-toolbar-btn tk-toolbar-btn--secondary'
+                    : 'tk-toolbar-btn';
                 btn.onclick = () => {
                     state.pageRetryCount = 0;
                     state.consecutiveEmptyPages = 0;
@@ -2774,24 +3808,13 @@
                 banner.appendChild(btn);
             }
 
-            if (actionLink && actionLink.href) {
-                const linkBtn = document.createElement('a');
-                linkBtn.textContent = actionLink.label || '打开下一页 ↗';
-                linkBtn.href = actionLink.href;
-                linkBtn.className = 'tk-toolbar-btn';
-                linkBtn.style.marginLeft = '8px';
-                linkBtn.style.textDecoration = 'none';
-                linkBtn.style.display = 'inline-block';
-                banner.appendChild(linkBtn);
-            }
-
             banner.style.display = 'block';
             banner.style.opacity = '1';
         },
 
-        stopPagination(message, showContinueBtn = true, actionLink = null) {
+        stopPagination(message, continueOption = true, extraActions = null) {
             state.targetValidCount = this.getVisibleCardsCount();
-            this.showStatusBanner(message, showContinueBtn, actionLink);
+            this.showStatusBanner(message, continueOption, extraActions);
             this.dispatchQueue({ preserveBanner: true });
         },
 
@@ -2847,7 +3870,7 @@
             this.showStatusBanner(`正在载入第 ${pageNum} 页数据以补充卡片... (当前展示项目: ${this.getVisibleCardsCount()}/${state.targetValidCount})`);
             state.isFetchingPage = true;
 
-            sameOriginFetch(nextUrl).then(response => {
+            sameOriginFetch(nextUrl).then(async response => {
                 console.log(`[TorrentKitty] 第 ${pageNum} 页响应: HTTP ${response.status} -> ${response.finalUrl}`);
                 if (response.status === 404 || response.status === 410) {
                     const err = new Error('NO_MORE_PAGES');
@@ -2859,8 +3882,14 @@
                     err.status = response.status;
                     throw err;
                 }
+                const html = await response.text();
+                if (this.isCloudflareHtml(response.status, html)) {
+                    const err = new Error('ACCESS_DENIED');
+                    err.status = response.status;
+                    throw err;
+                }
                 if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                return response.text();
+                return html;
             }).then(html => {
                 state.pageRetryCount = 0;
 
@@ -2965,9 +3994,14 @@
 
                 if (error.message === 'ACCESS_DENIED') {
                     this.stopPagination(
-                        '翻页请求被站点拦截 (HTTP 403)，可尝试直接打开下一页。',
-                        true,
-                        { label: `打开第 ${pageNum} 页 ↗`, href: nextUrl }
+                        '站点触发 Cloudflare 验证 (HTTP 403)，请点击按钮弹出小窗过盾，完成后将自动继续拉页。',
+                        { label: '↻ 重试加载', secondary: true },
+                        [
+                            {
+                                label: '🛡️ 弹出小窗过 CF 盾',
+                                onClick: () => this.openCfVerifyPopup(nextUrl, pageNum)
+                            }
+                        ]
                     );
                     return;
                 }
@@ -2990,6 +4024,7 @@
         init() {
             StyleUtils.injectGlobalStyles();
             SettingsManager.load();
+            JavDBService.loadCircuitState();
             CacheManager.init();
             EntryCacheManager.cleanupStale();
 
@@ -3075,6 +4110,7 @@
         },
 
         cleanup() {
+            this._clearCfVerifyWatch();
             CacheManager.flushOrder();
             if (state.observer) {
                 state.observer.disconnect();
@@ -3087,7 +4123,9 @@
         }
     };
 
-    if (document.readyState === 'loading') {
+    if (window.name === CF_VERIFY_WINDOW_NAME) {
+        console.log('[TorrentKitty] 当前为 Cloudflare 验证小窗，跳过网格渲染以加快验证完成');
+    } else if (document.readyState === 'loading') {
         document.addEventListener('DOMContentLoaded', () => App.init(), { once: true });
     } else {
         App.init();
