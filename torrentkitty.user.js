@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.0.2
+// @version      5.0.3
 // @description  TorrentKitty 增强：卡片化网格浏览流、三源高清封面分摊与熔断、两级图文收藏夹与本地 WebP 分片缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -330,7 +330,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.2';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.3';
 
     const CONFIG = {
         defaults: {
@@ -1800,8 +1800,82 @@
                     box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
                 }
 
+                /* 页面下滑后固定在视口最上方右上角的收藏夹悬浮胶囊 */
+                .tk-fav-floating-bar {
+                    position: fixed;
+                    top: 12px;
+                    right: 16px;
+                    z-index: 9990;
+                    display: inline-flex;
+                    align-items: center;
+                    gap: 6px;
+                    padding: 5px 6px;
+                    border-radius: 9999px;
+                    background: rgba(252, 248, 239, 0.88);
+                    backdrop-filter: blur(10px);
+                    -webkit-backdrop-filter: blur(10px);
+                    border: 1px solid rgba(24, 100, 89, 0.28);
+                    box-shadow: 0 8px 24px rgba(25, 38, 48, 0.16);
+                    opacity: 0;
+                    transform: translateY(-14px);
+                    pointer-events: none;
+                    transition: opacity 0.22s ease, transform 0.22s ease;
+                    font-family: var(--tk-font-body);
+                }
+
+                .tk-fav-floating-bar.is-visible {
+                    opacity: 1;
+                    transform: translateY(0);
+                    pointer-events: auto;
+                }
+
+                .tk-fav-float-btn,
+                .tk-fav-float-top {
+                    border: none;
+                    border-radius: 9999px;
+                    cursor: pointer;
+                    font-family: inherit;
+                    font-weight: 700;
+                    transition: background 0.18s ease, color 0.18s ease, transform 0.15s ease;
+                }
+
+                .tk-fav-float-btn {
+                    padding: 6px 13px;
+                    font-size: 12px;
+                    background: var(--tk-sage);
+                    color: #fcf8ef;
+                }
+
+                .tk-fav-float-btn:hover {
+                    background: #114d45;
+                }
+
+                .tk-fav-float-top {
+                    width: 28px;
+                    height: 28px;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    font-size: 13px;
+                    background: rgba(61, 50, 38, 0.08);
+                    color: var(--tk-earth-darker);
+                }
+
+                .tk-fav-float-top:hover {
+                    background: rgba(61, 50, 38, 0.16);
+                }
+
                 /* 手机窄屏响应式适配 */
                 @media (max-width: 640px) {
+                    .tk-fav-floating-bar {
+                        top: 8px;
+                        right: 10px;
+                        padding: 4px 5px;
+                    }
+                    .tk-fav-float-btn {
+                        padding: 5px 11px;
+                        font-size: 12px;
+                    }
                     .tk-main-container {
                         padding: 12px;
                         border-radius: 16px;
@@ -2671,9 +2745,14 @@
 
         syncUI() {
             if (typeof document === 'undefined') return;
+            const countText = String(this.getItems().length);
             const countEl = document.getElementById('tk-fav-count');
             if (countEl) {
-                countEl.textContent = String(this.getItems().length);
+                countEl.textContent = countText;
+            }
+            const floatCountEl = document.getElementById('tk-fav-float-count');
+            if (floatCountEl) {
+                floatCountEl.textContent = countText;
             }
             const cards = document.querySelectorAll('.tk-media-card');
             cards.forEach(card => {
@@ -5262,6 +5341,40 @@
             });
 
             document.getElementById('tk-btn-favorites').onclick = () => ModalManager.showFavorites();
+
+            // 页面向下滚动超过顶部工具栏时，在视口最上方右上角常驻悬浮收藏夹入口
+            if (!document.getElementById('tk-fav-floating-bar')) {
+                const floatBar = document.createElement('div');
+                floatBar.id = 'tk-fav-floating-bar';
+                floatBar.className = 'tk-fav-floating-bar';
+                floatBar.innerHTML = `
+                    <button type="button" class="tk-fav-float-btn" id="tk-fav-float-btn" title="打开我的收藏夹">⭐ 收藏夹 (<span id="tk-fav-float-count">0</span>)</button>
+                    <button type="button" class="tk-fav-float-top" id="tk-fav-float-top" title="回到顶部">↑</button>
+                `;
+                document.body.appendChild(floatBar);
+
+                document.getElementById('tk-fav-float-btn').onclick = () => ModalManager.showFavorites();
+                document.getElementById('tk-fav-float-top').onclick = () => {
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                };
+
+                const updateFloatingVisibility = () => {
+                    const rect = toolbar.getBoundingClientRect();
+                    floatBar.classList.toggle('is-visible', rect.bottom < 8);
+                };
+                if (typeof IntersectionObserver === 'function') {
+                    const io = new IntersectionObserver((entries) => {
+                        const entry = entries[0];
+                        if (!entry) return;
+                        const passedTop = !entry.isIntersecting && entry.boundingClientRect.bottom < 8;
+                        floatBar.classList.toggle('is-visible', passedTop);
+                    }, { threshold: 0 });
+                    io.observe(toolbar);
+                } else {
+                    window.addEventListener('scroll', updateFloatingVisibility, { passive: true });
+                }
+                updateFloatingVisibility();
+            }
             document.getElementById('tk-btn-clear-cache').onclick = () => {
                 const { coverCount, entryCount } = CacheManager.clearAll();
                 const cards = document.querySelectorAll('.tk-media-card');
@@ -8227,6 +8340,7 @@
                     !m.target.closest?.('.tk-drawer-overlay') &&
                     !m.target.closest?.('.tk-modal-overlay') &&
                     !m.target.closest?.('.tk-fav-popover') &&
+                    !m.target.closest?.('.tk-fav-floating-bar') &&
                     !m.target.closest?.('.tk-lightbox-overlay') &&
                     !m.target.closest?.('table#archiveResult, table.results, .search-results, [data-tk-result-table="true"]')
                 );
