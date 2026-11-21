@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.0.1
+// @version      5.0.2
 // @description  TorrentKitty 增强：卡片化网格浏览流、三源高清封面分摊与熔断、两级图文收藏夹与本地 WebP 分片缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -330,7 +330,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.1';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.2';
 
     const CONFIG = {
         defaults: {
@@ -2695,7 +2695,7 @@
         PREFIX: 'tk_fav_img_',
         MAX_SHORT_SIDE: 480,
         MAX_LONG_SIDE: 1280,
-        QUALITY: 0.80,
+        QUALITY: 0.95,
         _inflight: new Map(),
         _listeners: new Set(),
 
