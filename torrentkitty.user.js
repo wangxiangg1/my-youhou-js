@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.1.0
+// @version      5.1.1
 // @description  TorrentKitty + JavDB + MissAV + Jable 全站增强：卡片流瀑布、三源高清封面、跨站直达互跳、全站私有两级收藏夹与 WebP 缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -352,7 +352,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.1.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.1.1';
 
     const CONFIG = {
         defaults: {
@@ -1294,10 +1294,39 @@
 
                 /* 两级收藏浮层 */
                 .tk-fav-modal {
+                    position: relative !important;
                     box-sizing: border-box;
                     display: flex;
                     flex-direction: column;
                     overflow: hidden !important;
+                }
+
+                .tk-fav-modal-close {
+                    position: absolute;
+                    top: 14px;
+                    right: 14px;
+                    z-index: 6;
+                    width: 36px;
+                    height: 36px;
+                    border-radius: 50%;
+                    border: 1px solid rgba(61, 50, 38, 0.18);
+                    background: rgba(255, 255, 255, 0.9);
+                    color: var(--tk-earth-darker);
+                    font-size: 16px;
+                    font-weight: 700;
+                    line-height: 1;
+                    display: inline-flex;
+                    align-items: center;
+                    justify-content: center;
+                    cursor: pointer;
+                    box-shadow: 0 3px 10px rgba(25, 38, 48, 0.12);
+                    transition: background 0.18s ease, color 0.18s ease, transform 0.15s ease;
+                }
+
+                .tk-fav-modal-close:hover {
+                    background: var(--tk-loss-red);
+                    border-color: var(--tk-loss-red);
+                    color: #fff;
                 }
 
                 .tk-fav-modal-body {
@@ -1314,6 +1343,13 @@
                     justify-content: space-between;
                     flex-wrap: wrap;
                     gap: 10px;
+                    padding-right: 46px;
+                    min-height: 36px;
+                }
+
+                .tk-card-mobile-date {
+                    display: none;
+                }
                 }
 
                 .tk-fav-modal-title {
@@ -2031,6 +2067,43 @@
                     border-color: #6b4810;
                 }
 
+                /* 移动端 / 触屏卡片高密度精简：仅保留番号与日期，收紧内边距 */
+                @media (max-width: 768px), (hover: none) and (pointer: coarse) {
+                    .tk-grid-wrapper {
+                        gap: 12px;
+                        padding: 8px 0;
+                    }
+                    .tk-media-card {
+                        border-radius: 14px;
+                    }
+                    .tk-card-cover-wrapper {
+                        aspect-ratio: 16 / 10;
+                    }
+                    .tk-card-content {
+                        padding: 8px 10px 10px;
+                        gap: 6px;
+                    }
+                    .tk-card-title,
+                    .tk-card-size,
+                    .tk-card-date {
+                        display: none !important;
+                    }
+                    .tk-card-mobile-date {
+                        display: inline-block;
+                        margin-left: auto;
+                        font-size: 12px;
+                        color: var(--tk-text-muted);
+                    }
+                    .tk-card-actions {
+                        gap: 6px;
+                        padding-top: 2px;
+                    }
+                    .tk-btn-modern {
+                        padding: 6px 4px;
+                        font-size: 12px;
+                    }
+                }
+
                 /* 手机窄屏响应式适配 */
                 @media (max-width: 640px) {
                     .tk-fav-floating-bar {
@@ -2043,17 +2116,39 @@
                         font-size: 12px;
                     }
                     .tk-main-container {
-                        padding: 12px;
-                        border-radius: 16px;
+                        padding: 10px;
+                        border-radius: 14px;
                     }
                     .tk-modern-toolbar {
-                        padding: 12px;
-                        gap: 12px;
+                        padding: 10px 12px;
+                        gap: 10px;
+                        margin-bottom: 12px;
                     }
                     .tk-fav-modal {
                         width: 96% !important;
-                        padding: 14px !important;
+                        padding: 12px !important;
                         max-height: 92vh !important;
+                    }
+                    .tk-fav-modal-close {
+                        top: 10px;
+                        right: 10px;
+                        width: 38px;
+                        height: 38px;
+                        font-size: 17px;
+                    }
+                    .tk-fav-modal-header {
+                        padding-right: 48px;
+                        min-height: 38px;
+                    }
+                    .tk-fav-mini-btn {
+                        padding: 6px 10px;
+                        font-size: 12px;
+                    }
+                    .tk-lightbox-close {
+                        top: 10px;
+                        right: 10px;
+                        width: 38px;
+                        height: 38px;
                     }
                     .tk-fav-folder-grid,
                     .tk-fav-detail-grid {
@@ -5883,11 +5978,15 @@
             codeSpan.className = 'tk-card-code';
             codeSpan.textContent = data.code;
 
+            const mobileDateSpan = document.createElement('span');
+            mobileDateSpan.className = 'tk-card-meta tk-card-mobile-date';
+            mobileDateSpan.textContent = `📅 ${data.date}`;
+
             const sizeSpan = document.createElement('span');
-            sizeSpan.className = 'tk-card-meta';
+            sizeSpan.className = 'tk-card-meta tk-card-size';
             sizeSpan.textContent = data.size;
 
-            header.append(codeSpan, sizeSpan);
+            header.append(codeSpan, mobileDateSpan, sizeSpan);
 
             const titleDiv = document.createElement('div');
             titleDiv.className = 'tk-card-title';
@@ -5895,7 +5994,7 @@
             titleDiv.textContent = data.title;
 
             const dateDiv = document.createElement('div');
-            dateDiv.className = 'tk-card-meta';
+            dateDiv.className = 'tk-card-meta tk-card-date';
             dateDiv.style.marginTop = '-4px';
             dateDiv.textContent = `📅 ${data.date}`;
 
@@ -6617,7 +6716,15 @@
 
             const bodyWrap = document.createElement('div');
             bodyWrap.className = 'tk-fav-modal-body';
-            panel.appendChild(bodyWrap);
+
+            const modalCloseBtn = document.createElement('button');
+            modalCloseBtn.type = 'button';
+            modalCloseBtn.className = 'tk-fav-modal-close';
+            modalCloseBtn.title = '关闭收藏夹';
+            modalCloseBtn.textContent = '✕';
+            modalCloseBtn.onclick = () => overlay.remove();
+
+            panel.append(modalCloseBtn, bodyWrap);
 
             const buildSyncPill = () => {
                 const pill = document.createElement('button');
@@ -6887,13 +6994,7 @@
                     renderCurrentView();
                 };
 
-                const closeBtn = document.createElement('button');
-                closeBtn.type = 'button';
-                closeBtn.className = 'tk-fav-mini-btn';
-                closeBtn.textContent = '✕ 关闭';
-                closeBtn.onclick = () => overlay.remove();
-
-                topActions.append(newFolderBtn, syncPill, syncCenterBtn, closeBtn);
+                topActions.append(newFolderBtn, syncPill, syncCenterBtn);
                 header.append(titleEl, topActions);
 
                 const searchRow = document.createElement('div');
@@ -7184,13 +7285,7 @@
                     renderCurrentView();
                 };
 
-                const closeBtn = document.createElement('button');
-                closeBtn.type = 'button';
-                closeBtn.className = 'tk-fav-mini-btn';
-                closeBtn.textContent = '✕ 关闭';
-                closeBtn.onclick = () => overlay.remove();
-
-                topActions.append(syncBtn, closeBtn);
+                topActions.append(syncBtn);
                 header.append(leftNav, topActions);
 
                 const searchRow = document.createElement('div');
@@ -7274,13 +7369,7 @@
 
                 leftNav.append(backBtn, titleEl);
 
-                const closeBtn = document.createElement('button');
-                closeBtn.type = 'button';
-                closeBtn.className = 'tk-fav-mini-btn';
-                closeBtn.textContent = '✕ 关闭';
-                closeBtn.onclick = () => overlay.remove();
-
-                header.append(leftNav, closeBtn);
+                header.append(leftNav);
 
                 const scrollArea = document.createElement('div');
                 scrollArea.className = 'tk-fav-scroll-area tk-sync-sections';
