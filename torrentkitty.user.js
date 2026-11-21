@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.0.0
+// @version      5.0.1
 // @description  TorrentKitty 增强：卡片化网格浏览流、三源高清封面分摊与熔断、两级图文收藏夹与本地 WebP 分片缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -330,7 +330,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.0';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.1';
 
     const CONFIG = {
         defaults: {
@@ -2693,7 +2693,8 @@
     // ==================== 封面 WebP 压缩与分片缓存 ====================
     const CoverMediaStore = {
         PREFIX: 'tk_fav_img_',
-        MAX_WIDTH: 480,
+        MAX_SHORT_SIDE: 480,
+        MAX_LONG_SIDE: 1280,
         QUALITY: 0.80,
         _inflight: new Map(),
         _listeners: new Set(),
@@ -2822,6 +2823,26 @@
             });
         },
 
+        computeTargetSize(srcW, srcH) {
+            if (!srcW || !srcH) return { width: 0, height: 0 };
+            const shortSide = Math.min(srcW, srcH);
+            const longSide = Math.max(srcW, srcH);
+            let scale = 1;
+            if (shortSide > this.MAX_SHORT_SIDE) {
+                scale = this.MAX_SHORT_SIDE / shortSide;
+            }
+            if (longSide * scale > this.MAX_LONG_SIDE) {
+                scale = this.MAX_LONG_SIDE / longSide;
+            }
+            if (scale >= 1) {
+                return { width: srcW, height: srcH };
+            }
+            return {
+                width: Math.max(1, Math.round(srcW * scale)),
+                height: Math.max(1, Math.round(srcH * scale))
+            };
+        },
+
         async compressBlobToDataUrl(blob) {
             if (!blob || blob.size === 0) {
                 throw new Error('图片内容为空');
@@ -2833,8 +2854,7 @@
                 if (!srcW || !srcH) {
                     throw new Error('无效的图片尺寸');
                 }
-                const targetW = srcW > this.MAX_WIDTH ? this.MAX_WIDTH : srcW;
-                const targetH = srcW > this.MAX_WIDTH ? Math.max(1, Math.round((srcH * this.MAX_WIDTH) / srcW)) : srcH;
+                const { width: targetW, height: targetH } = this.computeTargetSize(srcW, srcH);
 
                 const canvas = document.createElement('canvas');
                 canvas.width = targetW;
@@ -7147,12 +7167,44 @@
                         </div>
                         <div class="tk-sync-btn-row">
                             <button type="button" id="tk-clean-orphan-covers" class="tk-fav-mini-btn">🧹 清理无用孤儿图</button>
+                            <button type="button" id="tk-refresh-all-covers" class="tk-fav-mini-btn">🔄 按 480p 重抓刷新封面</button>
                         </div>
+                        <div id="tk-cover-refresh-progress" class="tk-card-meta" style="margin-top:8px;"></div>
                     `;
                     cacheCard.querySelector('#tk-clean-orphan-covers').onclick = () => {
                         const res = CoverMediaStore.cleanupOrphans();
                         renderMediaCacheCard();
                         alert(`已清理 ${res.removedCount} 张孤儿封面，释放 ${res.freedMb} MB 存储空间。`);
+                    };
+                    const refreshBtn = cacheCard.querySelector('#tk-refresh-all-covers');
+                    const progressEl = cacheCard.querySelector('#tk-cover-refresh-progress');
+                    refreshBtn.onclick = async () => {
+                        const items = FavoritesManager.getItems();
+                        if (items.length === 0) {
+                            alert('当前暂无收藏条目。');
+                            return;
+                        }
+                        refreshBtn.disabled = true;
+                        let done = 0;
+                        let updated = 0;
+                        for (const item of items) {
+                            done++;
+                            progressEl.textContent = `正在重抓刷新 (${done}/${items.length})：${item.code}...`;
+                            try {
+                                let url = item.coverUrl;
+                                if (!url && typeof QueueManager !== 'undefined') {
+                                    url = await QueueManager.resolveCoverOnce(item.code);
+                                }
+                                if (url) {
+                                    const resUrl = await CoverMediaStore.captureFromUrl(item.id, url, { force: true });
+                                    if (resUrl) updated++;
+                                }
+                            } catch {
+                                // 跳过单条异常
+                            }
+                        }
+                        renderMediaCacheCard();
+                        cacheCard.querySelector('#tk-cover-refresh-progress').textContent = `✅ 刷新完成：共处理 ${items.length} 条，成功更新 ${updated} 张 480p 封面。`;
                     };
                 };
                 renderMediaCacheCard();
