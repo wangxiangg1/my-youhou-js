@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         TorrentKitty to MissAV & JavDB with Cover + Settings
 // @namespace    http://tampermonkey.net/
-// @version      5.0.3
+// @version      5.0.4
 // @description  TorrentKitty 增强：卡片化网格浏览流、三源高清封面分摊与熔断、两级图文收藏夹与本地 WebP 分片缓存、CF Worker+D1 端到端加密云同步 (Organic 配色版)
 // @author       Gemini 4 Neon
 // @match        *://www.torrentkitty.tv/*
@@ -330,7 +330,7 @@
     };
 
     // ==================== 版本与配置常量 ====================
-    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.3';
+    const VERSION = (typeof GM_info !== 'undefined' && GM_info?.script?.version) || '5.0.4';
 
     const CONFIG = {
         defaults: {
@@ -3504,6 +3504,7 @@
             if (queue.length === 0) return;
 
             const remaining = [];
+            let lastErr = '';
             for (const id of queue) {
                 const item = FavoritesManager.findById(id, false);
                 if (!item) continue;
@@ -3512,11 +3513,15 @@
                 try {
                     await this.uploadLocalCover(id, localDataUrl);
                 } catch (e) {
-                    console.warn(`[TorrentKitty] 上传封面失败 (${id}):`, e?.message || e);
+                    lastErr = e?.message || String(e);
+                    console.warn(`[TorrentKitty] 上传封面失败 (${id}):`, lastErr);
                     remaining.push(id);
                 }
             }
             this.config.pendingCoverUploads = remaining;
+            if (remaining.length > 0 && lastErr) {
+                this._setSyncStatus({ error: `部分封面上传失败 (${remaining.length} 张): ${lastErr}` });
+            }
             this.saveConfig();
         },
 
@@ -3527,9 +3532,12 @@
             if (plainBytes.length === 0) return false;
             const { encKey } = await CryptoHelper.deriveKeys(this.config.passphrase);
             const cipherBytes = await CryptoHelper.encryptBytes(encKey, plainBytes);
+            const payloadBlob = typeof Blob === 'function'
+                ? new Blob([cipherBytes], { type: 'application/octet-stream' })
+                : cipherBytes.buffer;
             const { res } = await this._authedRequest(`/api/covers/${encodeURIComponent(itemId)}`, {
                 method: 'PUT',
-                data: cipherBytes.buffer,
+                data: payloadBlob,
                 headers: { 'Content-Type': 'application/octet-stream' }
             });
             if (!res.ok) {
@@ -3690,7 +3698,7 @@
 
                     // 增量上传新生成的封面（或本地有但未标记上传的）
                     itemsToSend.forEach(it => {
-                        if (it && !it.deletedAt && CoverMediaStore.hasLocalCover(it.id) && !it._coverUploaded) {
+                        if (it && !it.deletedAt && CoverMediaStore.hasLocalCover(it.id)) {
                             if (!this.config.pendingCoverUploads.includes(it.id)) {
                                 this.config.pendingCoverUploads.push(it.id);
                             }
@@ -3698,12 +3706,17 @@
                     });
                     await this.flushPendingCovers();
 
+                    try {
+                        await this.ping();
+                    } catch {
+                        // 统计查询失败不影响主同步结果
+                    }
+
                     this._setSyncStatus({
                         state: 'synced',
                         label: '☁️ 已同步',
                         lastSyncAt: this.config.lastSyncAt,
-                        dirty: this.config.dirty,
-                        error: ''
+                        dirty: this.config.dirty
                     });
 
                     if (hasUnpushed && reason !== 'followup') {
@@ -7154,8 +7167,9 @@
                         ? new Date(SyncEngine.config.lastSyncAt).toLocaleString()
                         : '从未同步';
                     const stats = state.syncStatus.stats;
+                    const formatBytes = (b) => b >= 1024 * 1024 ? `${(b / 1024 / 1024).toFixed(2)} MB` : `${Math.round(b / 1024)} KB`;
                     const statsStr = stats
-                        ? ` ｜ 云端统计：${stats.folders} 夹 / ${stats.items} 条 / ${stats.covers} 张图 (${(stats.coverBytes / 1024 / 1024).toFixed(2)} MB)`
+                        ? ` ｜ 云端统计：${stats.folders} 夹 / ${stats.items} 条 / ${stats.covers} 张图 (${formatBytes(stats.coverBytes || 0)})`
                         : '';
                     const errStr = state.syncStatus.error ? ` ｜ ⚠️ ${state.syncStatus.error}` : '';
                     feedbackEl.textContent = `状态：${state.syncStatus.label} ｜ 上次同步：${lastStr}${statsStr}${errStr}${extra ? ' ｜ ' + extra : ''}`;
